@@ -1,0 +1,254 @@
+{
+  "info": {
+    "_postman_id": "f8b1b3b6-3a8d-4a88-9f0f-9b6b0a2c2c77",
+    "name": "Administration DIGECUR API",
+    "description": "Colección de endpoints para la API DIGECUR (Node.js + Express + MongoDB).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "token", "value": "", "type": "string" },
+    { "key": "userId", "value": "", "type": "string" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{token}}", "type": "string" }
+    ]
+  },
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "auth": { "type": "noauth" },
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user1@example.com\",\n  \"password\": \"User#123456\",\n  \"nombre\": \"Usuario Uno\",\n  \"departamento\": \"DIRECCION\",\n  \"cargo\": \"Analista\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/auth/register", "host": ["{{baseUrl}}"], "path": ["digecur","v1","auth","register"] }
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.code === 200);",
+                  "const json = pm.response.json();",
+                  "const token = json && json.user && json.user.token;",
+                  "if (token) {",
+                  "  pm.collectionVariables.set('token', token);",
+                  "  console.log('Token guardado en {{token}}');",
+                  "} else {",
+                  "  console.warn('No se encontró token en la respuesta');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@digecur.local\",\n  \"password\": \"Admin#123456\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/auth/login", "host": ["{{baseUrl}}"], "path": ["digecur","v1","auth","login"] }
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/digecur/v1/auth/me", "host": ["{{baseUrl}}"], "path": ["digecur","v1","auth","me"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Create User (ADMIN/DIRECTOR)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.code === 201);",
+                  "const json = pm.response.json();",
+                  "const id = json && json.user && (json.user.id || json.user._id);",
+                  "if (id) { pm.collectionVariables.set('userId', id); console.log('userId =>', id); }"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new.user@example.com\",\n  \"password\": \"User#123456\",\n  \"nombre\": \"Nuevo Usuario\",\n  \"departamento\": \"INVENTARIO\",\n  \"cargo\": \"Auxiliar\",\n  \"roles\": [\"INVENTARIO\"]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users"] }
+          }
+        },
+        {
+          "name": "Get All Users (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/digecur/v1/users?q=&role=&departamento=&isActive=&page=1&limit=20&sort=-createdAt",
+              "host": ["{{baseUrl}}"],
+              "path": ["digecur","v1","users"],
+              "query": [
+                { "key": "q", "value": "" },
+                { "key": "role", "value": "" },
+                { "key": "departamento", "value": "" },
+                { "key": "isActive", "value": "" },
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "sort", "value": "-createdAt" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Users Stats (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/stats", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","stats"] }
+          }
+        },
+        {
+          "name": "Export Users CSV (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/export", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","export"] }
+          }
+        },
+        {
+          "name": "Bulk Set Active (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ids\": [\"{{userId}}\"],\n  \"isActive\": true\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/bulk/active", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","bulk","active"] }
+          }
+        },
+        {
+          "name": "Move (Departamento/Cargo) (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"departamento\": \"ASISTENCIA\",\n  \"cargo\": \"Coordinador\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}/move", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}","move"] }
+          }
+        },
+        {
+          "name": "Get User by ID (Self o ADMIN/DIRECTOR)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}"] }
+          }
+        },
+        {
+          "name": "Update User (Self o ADMIN/DIRECTOR)",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nombre\": \"Usuario Actualizado\",\n  \"cargo\": \"Especialista\",\n  \"departamento\": \"EVALUACION\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}"] }
+          }
+        },
+        {
+          "name": "Change Password (Self o ADMIN/DIRECTOR)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"currentPassword\": \"User#123456\",\n  \"newPassword\": \"User#654321\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}/password", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}","password"] }
+          }
+        },
+        {
+          "name": "Update Roles (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"roles\": [\"ADMIN\",\"DIRECTOR\"]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}/roles", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}","roles"] }
+          }
+        },
+        {
+          "name": "Deactivate User (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}/deactivate", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}","deactivate"] }
+          }
+        },
+        {
+          "name": "Activate User (ADMIN/DIRECTOR)",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}/activate", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}","activate"] }
+          }
+        },
+        {
+          "name": "Delete User (ADMIN)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/digecur/v1/users/{{userId}}", "host": ["{{baseUrl}}"], "path": ["digecur","v1","users","{{userId}}"] }
+          }
+        }
+      ]
+    }
+  ]
+}
