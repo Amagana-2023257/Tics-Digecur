@@ -2,14 +2,14 @@
   "name": "administration-digecur-api",
   "version": "1.0.0",
   "description": "API backend (Node.js, Express, MongoDB) para Administration DIGECUR",
-"type": "module",
-"main": "index.js",
-"scripts": {
-  "dev": "nodemon --watch src --ext js,json index.js",
-  "start": "node index.js",
-  "test": "echo \"(sin tests por ahora)\" && exit 0",
-  "lint": "eslint ."
-},
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon --watch src --ext js,json index.js",
+    "start": "node index.js",
+    "test": "echo \"(sin tests por ahora)\" && exit 0",
+    "lint": "eslint ."
+  },
   "keywords": [
     "digecur",
     "administration",
@@ -33,6 +33,7 @@
     "express-rate-limit": "^7.5.0",
     "express-validator": "^7.2.1",
     "file-type": "^21.0.0",
+    "googleapis": "^160.0.0",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",
