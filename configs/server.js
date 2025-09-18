@@ -11,7 +11,7 @@ import apiLimiter from '../src/middlewares/rate-limit-validator.js';
 
 import authRoutes from '../src/auth/auth.routes.js';
 import userRoutes from '../src/user/user.routes.js';
-import cardexRouter, { mountCardexStatic } from '../src/cardex/cardex.routes.js';
+import cardexRouter from '../src/cardex/cardex.routes.js';
 import inventoryRoutes from '../src/Inventory/inventory.routes.js';
 
 import auditApiRoutes from '../src/movements/audit.routes.js';
@@ -21,15 +21,11 @@ import { ensureDefaultAdmin } from '../src/bootstrap/ensure-admin.js';
 import { connectMongo } from './mongo.js';
 import { attachAudit } from '../src/movements/movement.controller.js';
 
-// ⬇️ NUEVO:
-import { initDrive } from './drive.js';
+
 
 const { PORT = 3000, CORS_ORIGIN } = process.env;
 
 const middlewares = (app) => {
-  app.disable('x-powered-by');
-  app.set('trust proxy', true);
-
   app.use(express.urlencoded({ extended: false, limit: '10mb' }));
   app.use(express.json({ limit: '10mb' }));
   app.use(compression());
@@ -54,10 +50,6 @@ const middlewares = (app) => {
         "img-src": ["'self'", "data:"],
         "font-src": ["'self'", "data:"],
         "connect-src": ["'self'"],
-        // Si embeberás el visor de Drive en iframe:
-        // "frame-src": ["'self'", "https://drive.google.com"],
-        // Y si vas a mostrar imágenes servidas por Googleusercontent:
-        // "img-src": ["'self'", "data:", "https://lh3.googleusercontent.com", "https://drive.google.com"],
       }
     },
     referrerPolicy: { policy: "no-referrer" },
@@ -68,8 +60,6 @@ const middlewares = (app) => {
   app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
   app.use(apiLimiter);
 
-  // (Si mantienes archivos locales, deja este mount; si TODO va a Drive, puedes quitarlo)
-  mountCardexStatic(app);
 
   attachAudit(app);
 };
@@ -87,6 +77,7 @@ const routes = (app) => {
 
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 
+
   app.use((_req, res) => res.status(404).json({ success: false, message: 'Not found' }));
 };
 
@@ -94,13 +85,8 @@ export const initServer = async () => {
   const app = express();
   try {
     middlewares(app);
-
-    // ⬇️ Conexiones
     await connectMongo();
     await ensureDefaultAdmin();
-
-    // ⬇️ NUEVO: Google Drive
-    await initDrive();
 
     routes(app);
 
