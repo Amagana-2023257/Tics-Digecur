@@ -1,123 +1,99 @@
-import mongoose from 'mongoose';
+// src/cardex/cardex.model.js
+import mongoose from "mongoose";
 
-export const CARDEX_CATS = Object.freeze([
-  'LIBRO',
-  'DOCUMENTO',
-  'INFORME',
-  'MANUAL',
-  'OTRO',
-  // nuevas
-  'BIFOLIAR',
-  'FOLLETO',
-  'MODULOS',
-  'GUIAS',
-  'INSTRUCTIVO',
-  'FASCICULOS',
-]);
+const { Schema } = mongoose;
 
-const normalizaTags = (val) => {
-  if (Array.isArray(val)) {
-    return val.map(String).map(s => s.trim()).filter(Boolean);
-  }
-  if (typeof val === 'string') {
-    return val.split(',').map(s => s.trim()).filter(Boolean);
-  }
-  return [];
-};
+/* ============================================================================
+   Catálogo de categorías públicas para validación
+============================================================================ */
+export const CARDEX_CATS = [
+  "DOCUMENTO",
+  "LIBRO",
+  "INFORME",
+  "MANUAL",
+  "OTRO",
+  "BIFOLIAR",
+  "FOLLETO",
+  "MODULOS",
+  "GUIAS",
+  "INSTRUCTIVO",
+  "FASCICULOS",
+];
 
-const CardexSchema = new mongoose.Schema(
+/* ============================================================================
+   Esquema
+============================================================================ */
+const CardexSchema = new Schema(
   {
-    // Metadatos
     titulo: {
       type: String,
-      required: [true, 'El título es obligatorio'],
+      required: true,
       trim: true,
-      maxlength: [200, 'El título es muy largo'],
+      index: true,
     },
+
     descripcion: {
       type: String,
       trim: true,
-      default: '',
+      default: "",
     },
+
     categoria: {
       type: String,
       enum: CARDEX_CATS,
-      default: 'DOCUMENTO',
+      default: "DOCUMENTO",
       index: true,
     },
+
     tags: {
       type: [String],
       default: [],
-      set: normalizaTags, // asegura strings limpios
+      set: (arr) =>
+        Array.isArray(arr)
+          ? arr.map(String).map((s) => s.trim()).filter(Boolean)
+          : [],
     },
 
-    // Archivo físico
+    // Fuente / proveedor del recurso
+    provider: {
+      type: String, // 'onedrive' | 'legacy' | 'external' (opcional)
+      trim: true,
+      default: undefined,
+      index: true,
+    },
+
+    // URL externa del archivo (OneDrive/SharePoint/lo que sea)
+    onedriveUrl: {
+      type: String,
+      trim: true,
+      default: undefined, // MUY IMPORTANTE para no insertar "" y chocar con el índice único
+    },
+
+    // Legacy: nombre de archivo guardado localmente (si es que existe)
     fileName: {
       type: String,
-      required: [true, 'fileName es obligatorio'],
       trim: true,
-      unique: true,
-      index: true,
-    },
-    originalName: {
-      type: String,
-      required: [true, 'originalName es obligatorio'],
-      trim: true,
-    },
-    mimeType: {
-      type: String,
-      required: [true, 'mimeType es obligatorio'],
-      trim: true,
-    },
-    size: {
-      type: Number,
-      required: [true, 'size es obligatorio'],
-      min: [0, 'Tamaño inválido'],
+      default: undefined, // igual: evitar "" persistente
     },
 
-    // Atributos nuevos: fecha y año de creación del documento
-    fechaDocumento: {
-      type: Date,
-      default: null,
-      index: true,
-    },
-    anioDocumento: {
-      type: Number,
-      min: [1800, 'Año inválido'],
-      max: [3000, 'Año inválido'],
-      default: function () {
-        if (this.fechaDocumento instanceof Date && !isNaN(this.fechaDocumento)) {
-          return this.fechaDocumento.getUTCFullYear();
-        }
-        return undefined;
-      },
-      index: true,
-    },
+    // Metadatos opcionales
+    originalName: { type: String, trim: true, default: undefined },
+    mimeType: { type: String, trim: true, default: undefined },
+    size: { type: Number, default: undefined },
+
+    // Fechas del documento / año (para filtrado)
+    fechaDocumento: { type: Date, index: true, default: undefined },
+    anioDocumento: { type: Number, min: 1800, max: 3000, index: true },
 
     // Auditoría / estado
-    uploadedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      index: true,
-    },
-    isActive: {
-      type: Boolean,
-      default: true,
-      index: true,
-    },
-    views: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
-    downloads: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
+    uploadedBy: { type: Schema.Types.ObjectId, ref: "User", index: true },
+    isActive: { type: Boolean, default: true, index: true },
+    views: { type: Number, default: 0 },
+    downloads: { type: Number, default: 0 },
   },
   {
     timestamps: true,
+    minimize: true,
     versionKey: false,
     toJSON: {
       virtuals: true,
@@ -127,36 +103,71 @@ const CardexSchema = new mongoose.Schema(
         return ret;
       },
     },
+    toObject: { virtuals: true },
   }
 );
 
-/* =========================
- * Índices
- * =======================*/
+/* ============================================================================
+   Normalización: convertir "" en undefined en campos opcionales
+   (evita colisiones con los índices únicos parciales)
+============================================================================ */
+function emptyToUndef(v) {
+  if (v === "") return undefined;
+  if (typeof v === "string") {
+    const t = v.trim();
+    return t === "" ? undefined : t;
+  }
+  return v;
+}
 
-// Índice de texto SOLO en campos string (¡sin arrays!)
-// default_language "spanish" para stemming/búsqueda en español.
+CardexSchema.pre("validate", function normalizeOptionalStrings() {
+  this.onedriveUrl = emptyToUndef(this.onedriveUrl);
+  this.fileName = emptyToUndef(this.fileName);
+  this.originalName = emptyToUndef(this.originalName);
+  this.mimeType = emptyToUndef(this.mimeType);
+  this.provider = emptyToUndef(this.provider);
+  // Si llega categoria vacía por error, déjala como undefined y caerá en default/enum
+  this.categoria = emptyToUndef(this.categoria) ?? this.categoria;
+});
+
+/* ============================================================================
+   Índices
+   - Texto para búsqueda
+   - Únicos parciales para onedriveUrl / fileName (solo cuando tengan un string no vacío)
+============================================================================ */
 CardexSchema.index(
-  { titulo: 'text', descripcion: 'text', originalName: 'text' },
+  { titulo: "text", descripcion: "text", originalName: "text", tags: "text" },
+  { name: "cardex_text_idx", default_language: "spanish" }
+);
+
+// Unicidad SOLO si hay string no vacío
+CardexSchema.index(
+  { onedriveUrl: 1 },
   {
-    weights: { titulo: 6, descripcion: 3, originalName: 2 },
-    default_language: 'spanish',
-    name: 'cardex_text_v2',
+    unique: true,
+    name: "uniq_onedriveUrl_nonempty",
+    partialFilterExpression: { onedriveUrl: { $type: "string", $ne: "" } },
   }
 );
 
-// Búsquedas por etiqueta -> multikey (arrays soportados)
-CardexSchema.index({ tags: 1 }, { name: 'cardex_tags_idx' });
-
-// Compuesto útil para listados/filtrado reciente
+// Para legacy local: también único solo si hay string no vacío
 CardexSchema.index(
-  { categoria: 1, isActive: 1, createdAt: -1 },
-  { name: 'cardex_filters_idx' }
+  { fileName: 1 },
+  {
+    unique: true,
+    name: "uniq_fileName_nonempty",
+    partialFilterExpression: { fileName: { $type: "string", $ne: "" } },
+  }
 );
 
-// Índices para la nueva metadata temporal
-CardexSchema.index({ anioDocumento: 1 }, { name: 'cardex_year_idx' });
-CardexSchema.index({ fechaDocumento: -1 }, { name: 'cardex_date_idx' });
+// Aceleradores de consulta
+CardexSchema.index({ createdAt: -1 });
+CardexSchema.index({ updatedAt: -1 });
 
-const Cardex = mongoose.model('Cardex', CardexSchema);
+/* ============================================================================
+   Modelo
+============================================================================ */
+const Cardex =
+  mongoose.models.Cardex || mongoose.model("Cardex", CardexSchema);
+
 export default Cardex;

@@ -1,4 +1,3 @@
-// src/cardex/cardex.routes.js
 import { Router } from 'express';
 import { validateJWT } from '../middlewares/validate-jwt.js';
 import { hasRoles } from '../middlewares/validate-roles.js';
@@ -8,36 +7,29 @@ import {
   streamCardexFile, downloadCardexFile
 } from './cardex.controller.js';
 
-import {
-  uploadAnyFile,
-  makeUploadAnyToCloudinary,
-} from '../middlewares/multer-uploads.js';
-
 const router = Router();
 const CARD_ROLES = ['ADMIN', 'DIRECTOR', 'MATERIALES'];
 const canUseCardex = hasRoles(...CARD_ROLES);
 
-// Crear (campo: file/document/archivo)
-router.post(
-  '/',
-  validateJWT,
-  canUseCardex,
-  uploadAnyFile,
-  makeUploadAnyToCloudinary('cardex'), // ← sube a Cloudinary y deja req.file.filename + req.cloudinaryFile
-  createCardex
-);
+/* =========================================================
+   Sin subida de archivos — solo se recibe onedriveUrl en body
+   Body esperado en create/update:
+   {
+     titulo, descripcion, categoria, tags,
+     onedriveUrl,              // ← requerido
+     fechaDocumento?, anioDocumento?,
+     originalName?, mimeType?, size?,
+     isActive?
+   }
+   ========================================================= */
 
-// Actualizar (si viene reemplazo de archivo)
-router.put(
-  '/:cardexId',
-  validateJWT,
-  canUseCardex,
-  uploadAnyFile,
-  makeUploadAnyToCloudinary('cardex'),
-  updateCardex
-);
+// Crear
+router.post('/', validateJWT, canUseCardex, createCardex);
 
-// Resto igual:
+// Actualizar
+router.put('/:cardexId', validateJWT, canUseCardex, updateCardex);
+
+// Listar / Obtener / Eliminar / Ver / Descargar
 router.get('/', validateJWT, getAllCardex);
 router.get('/:cardexId', validateJWT, getCardexById);
 router.delete('/:cardexId', validateJWT, canUseCardex, deleteCardex);

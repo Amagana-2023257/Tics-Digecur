@@ -2,25 +2,25 @@
 import mongoose from 'mongoose';
 import InventoryItem from './item.model.js';
 import TransferRequest, { TRANSFER_STATUS } from './transferRequest.model.js';
+import TransferPendingCode from './transferPendingCode.model.js';
 import User from '../user/user.model.js';
 import { handleErrorResponse } from '../helpers/handleResponse.js';
 import { logActivity } from '../movements/movement.controller.js';
+import { sendMail } from '../helpers/mailer.js';
+import crypto from 'crypto';
 
-/* ============================= Helpers ============================= */
+/* ============================= Helpers genéricos ============================= */
 const toNumberOrUndef = (v) => {
   if (v === '' || v === null || typeof v === 'undefined') return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 };
-
 const toObjectIdOrUndef = (v) => {
   if (!v) return undefined;
   return mongoose.Types.ObjectId.isValid(v) ? new mongoose.Types.ObjectId(v) : undefined;
 };
-
 const userLabelFromDoc = (u, fallbackId) =>
   (u?.nombre || u?.name || '') || (u?.email || '') || String(fallbackId || u?._id || '');
-
 const fetchUserLabelById = async (oid) => {
   try {
     const u = await User.findById(oid).lean();
@@ -29,6 +29,11 @@ const fetchUserLabelById = async (oid) => {
     return String(oid);
   }
 };
+const userHasInventoryRole = (req) => {
+  const roles = Array.isArray(req?.user?.roles) ? req.user.roles.map(String) : [];
+  return roles.some((r) => ['ADMIN', 'DIRECTOR', 'INVENTARIO'].includes(r.toUpperCase()));
+};
+const escapeRx = (s = '') => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const sanitizeItem = (it) => {
   if (!it) return null;
@@ -37,8 +42,8 @@ const sanitizeItem = (it) => {
     noBien: it.noBien,
     nombreBien: it.nombreBien,
     descripcion: it.descripcion,
-    responsable: it.responsable, // etiqueta legible
-    responsableId: it.responsableId ? String(it.responsableId) : null, // ID de usuario
+    responsable: it.responsable,
+    responsableId: it.responsableId ? String(it.responsableId) : null,
     observaciones: it.observaciones,
     numeroTarjeta: it.numeroTarjeta,
     monto: typeof it.monto === 'number' ? it.monto : toNumberOrUndef(it.monto),
@@ -48,14 +53,12 @@ const sanitizeItem = (it) => {
   };
 };
 
-const userHasInventoryRole = (req) => {
-  const roles = Array.isArray(req?.user?.roles) ? req.user.roles.map(String) : [];
-  return roles.some((r) => ['ADMIN', 'DIRECTOR', 'INVENTARIO'].includes(r.toUpperCase()));
-};
+/* ============================= Helpers de traslado ============================= */
+const INVITE_TTL_MS = 15 * 60 * 1000; // 15 min
+const genCode = () => String(Math.floor(100000 + Math.random() * 900000)); // 6 dígitos
+const nowPlus = (ms) => new Date(Date.now() + ms);
 
-const escapeRx = (s = '') => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/* ============================= Filtros ============================= */
+/* ============================= Filtros (listados) ============================= */
 const buildFilter = (q = {}) => {
   const {
     q: text,
@@ -119,30 +122,23 @@ const buildFilter = (q = {}) => {
   if (orClauses.length > 0) {
     filter.$or = (filter.$or || []).concat(orClauses);
   }
-
   return filter;
 };
 
-/* ============================= CRUD ============================= */
+/* ============================================================================ */
+/*                                CRUD de bienes                               */
+/* ============================================================================ */
 export const createItem = async (req, res) => {
   try {
     let {
-      noBien,
-      nombreBien,
-      descripcion,
-      responsable,      // nombre/etiqueta (opcional)
-      responsableId,    // ID de usuario (opcional)
-      observaciones,
-      numeroTarjeta,
-      monto,
-      isActive,
+      noBien, nombreBien, descripcion,
+      responsable, responsableId, observaciones,
+      numeroTarjeta, monto, isActive,
     } = req.body;
 
     if (!noBien || !nombreBien) {
-      await logActivity({
-        req, action: 'INVENTORY_CREATE_FAIL', entity: 'INVENTORY_ITEM',
-        statusCode: 400, success: false, error: 'noBien y nombreBien son obligatorios', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_CREATE_FAIL', entity: 'INVENTORY_ITEM',
+        statusCode: 400, success: false, error: 'noBien y nombreBien son obligatorios', tags: ['inventory'] });
       return handleErrorResponse(res, 400, 'noBien y nombreBien son obligatorios');
     }
 
@@ -150,20 +146,14 @@ export const createItem = async (req, res) => {
     nombreBien = String(nombreBien).trim();
 
     const oid = toObjectIdOrUndef(responsableId);
-    // Si no vino etiqueta y SÍ vino ID, obtén etiqueta legible
     let responsableLabel = (typeof responsable === 'string' && responsable.trim()) ? responsable.trim() : undefined;
-    if (!responsableLabel && oid) {
-      responsableLabel = await fetchUserLabelById(oid);
-    }
+    if (!responsableLabel && oid) responsableLabel = await fetchUserLabelById(oid);
 
     const payload = {
-      noBien,
-      nombreBien,
-      descripcion,
+      noBien, nombreBien, descripcion,
       responsable: responsableLabel,
       responsableId: oid,
-      observaciones,
-      numeroTarjeta,
+      observaciones, numeroTarjeta,
       monto: toNumberOrUndef(monto),
       ...(typeof isActive === 'boolean' ? { isActive } : {}),
     };
@@ -176,24 +166,16 @@ export const createItem = async (req, res) => {
       after: sanitizeItem(item?.toJSON?.() || item), tags: ['inventory']
     });
 
-    return res.status(201).json({
-      success: true,
-      message: 'Bien creado exitosamente',
-      item: sanitizeItem(item),
-    });
+    return res.status(201).json({ success: true, message: 'Bien creado exitosamente', item: sanitizeItem(item) });
   } catch (err) {
     if (err?.code === 11000 && (err?.keyPattern?.noBien || err?.message?.includes('noBien'))) {
-      await logActivity({
-        req, action: 'INVENTORY_CREATE_FAIL', entity: 'INVENTORY_ITEM',
-        statusCode: 409, success: false, error: `noBien duplicado`, tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_CREATE_FAIL', entity: 'INVENTORY_ITEM',
+        statusCode: 409, success: false, error: 'noBien duplicado', tags: ['inventory'] });
       return handleErrorResponse(res, 409, `El noBien ya existe (${err?.keyValue?.noBien ?? ''})`);
     }
     console.error('Error al crear bien:', err);
-    await logActivity({
-      req, action: 'INVENTORY_CREATE_FAIL', entity: 'INVENTORY_ITEM',
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_CREATE_FAIL', entity: 'INVENTORY_ITEM',
+      statusCode: 500, success: false, error: err?.message, tags: ['inventory'] });
     return handleErrorResponse(res, 500, 'Error al crear bien', err?.message);
   }
 };
@@ -201,9 +183,7 @@ export const createItem = async (req, res) => {
 export const getAllItems = async (req, res) => {
   try {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.set('Surrogate-Control', 'no-store');
+    res.set('Pragma', 'no-cache'); res.set('Expires', '0'); res.set('Surrogate-Control', 'no-store');
 
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
@@ -223,9 +203,7 @@ export const getAllItems = async (req, res) => {
       if (myEmail) extraOr.push({ responsable: new RegExp(escapeRx(myEmail), 'i') });
       if (myName)  extraOr.push({ responsable: new RegExp(escapeRx(myName),  'i') });
 
-      if (extraOr.length) {
-        filter.$or = (filter.$or || []).concat(extraOr);
-      }
+      if (extraOr.length) filter.$or = (filter.$or || []).concat(extraOr);
     }
 
     const sort = req.query.sort ? String(req.query.sort) : '-createdAt';
@@ -235,23 +213,18 @@ export const getAllItems = async (req, res) => {
       InventoryItem.find(filter).sort(sort).skip(skip).limit(limit).lean(),
     ]);
 
-    await logActivity({
-      req, action: 'INVENTORY_LIST', entity: 'INVENTORY_ITEM',
-      statusCode: 200, success: true, message: `Listado OK (${docs.length})`, tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_LIST', entity: 'INVENTORY_ITEM',
+      statusCode: 200, success: true, message: `Listado OK (${docs.length})`, tags: ['inventory'] });
 
     return res.status(200).json({
-      success: true,
-      message: 'Bienes obtenidos exitosamente',
+      success: true, message: 'Bienes obtenidos exitosamente',
       pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
       items: docs.map(sanitizeItem),
     });
   } catch (err) {
     console.error('Error al obtener bienes:', err);
-    await logActivity({
-      req, action: 'INVENTORY_LIST_FAIL', entity: 'INVENTORY_ITEM',
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_LIST_FAIL', entity: 'INVENTORY_ITEM',
+      statusCode: 500, success: false, error: err?.message, tags: ['inventory'] });
     return handleErrorResponse(res, 500, 'Error al obtener bienes', err?.message);
   }
 };
@@ -260,29 +233,19 @@ export const getItemById = async (req, res) => {
   try {
     const item = await InventoryItem.findById(req.params.itemId).lean();
     if (!item) {
-      await logActivity({
-        req, action: 'INVENTORY_GET_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
-        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_GET_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
+        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory'] });
       return handleErrorResponse(res, 404, 'Bien no encontrado');
     }
 
-    await logActivity({
-      req, action: 'INVENTORY_GET', entity: 'INVENTORY_ITEM', entityId: item._id,
-      statusCode: 200, success: true, message: 'Bien encontrado', tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_GET', entity: 'INVENTORY_ITEM', entityId: item._id,
+      statusCode: 200, success: true, message: 'Bien encontrado', tags: ['inventory'] });
 
-    return res.status(200).json({
-      success: true,
-      message: 'Bien encontrado',
-      item: sanitizeItem(item),
-    });
+    return res.status(200).json({ success: true, message: 'Bien encontrado', item: sanitizeItem(item) });
   } catch (err) {
     console.error('Error al obtener bien:', err);
-    await logActivity({
-      req, action: 'INVENTORY_GET_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_GET_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
+      statusCode: 500, success: false, error: err?.message, tags: ['inventory'] });
     return handleErrorResponse(res, 500, 'Error al obtener bien', err?.message);
   }
 };
@@ -296,30 +259,22 @@ export const updateItem = async (req, res) => {
 
     if ('monto' in update) {
       const n = toNumberOrUndef(update.monto);
-      if (typeof n === 'number') update.monto = n;
-      else delete update.monto;
+      if (typeof n === 'number') update.monto = n; else delete update.monto;
     }
 
-    // Si cambia responsableId, sincroniza etiqueta "responsable"
     if ('responsableId' in update) {
       const oid = toObjectIdOrUndef(update.responsableId);
       if (oid) {
         update.responsableId = oid;
-        // Solo sobreescribe etiqueta si no la envían explícita
         if (!('responsable' in update) || !String(update.responsable || '').trim()) {
           update.responsable = await fetchUserLabelById(oid);
         } else if (typeof update.responsable === 'string') {
           update.responsable = update.responsable.trim();
-          if (!update.responsable) {
-            update.responsable = await fetchUserLabelById(oid);
-          }
+          if (!update.responsable) update.responsable = await fetchUserLabelById(oid);
         }
       } else {
-        // Si envían algo falsy, limpiamos el campo
         update.responsableId = undefined;
-        if (!('responsable' in update)) {
-          update.responsable = ''; // dejas etiqueta vacía si se quita el responsable
-        }
+        if (!('responsable' in update)) update.responsable = '';
       }
     }
 
@@ -330,10 +285,8 @@ export const updateItem = async (req, res) => {
 
     const before = await InventoryItem.findById(itemId).lean();
     if (!before) {
-      await logActivity({
-        req, action: 'INVENTORY_UPDATE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
-        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_UPDATE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
+        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory'] });
       return handleErrorResponse(res, 404, 'Bien no encontrado');
     }
 
@@ -345,24 +298,16 @@ export const updateItem = async (req, res) => {
       before: sanitizeItem(before), after: sanitizeItem(item), tags: ['inventory']
     });
 
-    return res.status(200).json({
-      success: true,
-      message: 'Bien actualizado',
-      item: sanitizeItem(item),
-    });
+    return res.status(200).json({ success: true, message: 'Bien actualizado', item: sanitizeItem(item) });
   } catch (err) {
     if (err?.code === 11000 && err?.keyPattern?.noBien) {
-      await logActivity({
-        req, action: 'INVENTORY_UPDATE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
-        statusCode: 409, success: false, error: 'noBien duplicado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_UPDATE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
+        statusCode: 409, success: false, error: 'noBien duplicado', tags: ['inventory'] });
       return handleErrorResponse(res, 409, 'El noBien ya existe');
     }
     console.error('Error al actualizar bien:', err);
-    await logActivity({
-      req, action: 'INVENTORY_UPDATE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_UPDATE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
+      statusCode: 500, success: false, error: err?.message, tags: ['inventory'] });
     return handleErrorResponse(res, 500, 'Error al actualizar bien', err?.message);
   }
 };
@@ -373,19 +318,15 @@ export const setActive = async (req, res) => {
     const { isActive } = req.body;
 
     if (typeof isActive !== 'boolean') {
-      await logActivity({
-        req, action: 'INVENTORY_SET_ACTIVE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
-        statusCode: 400, success: false, error: 'isActive debe ser boolean', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_SET_ACTIVE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
+        statusCode: 400, success: false, error: 'isActive debe ser boolean', tags: ['inventory'] });
       return handleErrorResponse(res, 400, 'isActive debe ser boolean');
     }
 
     const r = await InventoryItem.findByIdAndUpdate(itemId, { isActive }, { new: true }).lean();
     if (!r) {
-      await logActivity({
-        req, action: 'INVENTORY_SET_ACTIVE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
-        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_SET_ACTIVE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
+        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory'] });
       return handleErrorResponse(res, 404, 'Bien no encontrado');
     }
 
@@ -395,17 +336,11 @@ export const setActive = async (req, res) => {
       after: sanitizeItem(r), tags: ['inventory']
     });
 
-    return res.status(200).json({
-      success: true,
-      message: `Bien ${isActive ? 'activado' : 'desactivado'}`,
-      item: sanitizeItem(r),
-    });
+    return res.status(200).json({ success: true, message: `Bien ${isActive ? 'activado' : 'desactivado'}`, item: sanitizeItem(r) });
   } catch (err) {
     console.error('Error en setActive:', err);
-    await logActivity({
-      req, action: 'INVENTORY_SET_ACTIVE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_SET_ACTIVE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
+      statusCode: 500, success: false, error: err?.message, tags: ['inventory'] });
     return handleErrorResponse(res, 500, 'Error al actualizar bien', err?.message);
   }
 };
@@ -415,19 +350,15 @@ export const deleteItem = async (req, res) => {
     const { itemId } = req.params;
     const before = await InventoryItem.findById(itemId).lean();
     if (!before) {
-      await logActivity({
-        req, action: 'INVENTORY_DELETE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
-        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_DELETE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
+        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory'] });
       return handleErrorResponse(res, 404, 'Bien no encontrado');
     }
 
     const r = await InventoryItem.findByIdAndDelete(itemId);
     if (!r) {
-      await logActivity({
-        req, action: 'INVENTORY_DELETE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
-        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_DELETE_FAIL', entity: 'INVENTORY_ITEM', entityId: itemId,
+        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory'] });
       return handleErrorResponse(res, 404, 'Bien no encontrado');
     }
 
@@ -437,50 +368,132 @@ export const deleteItem = async (req, res) => {
       before: sanitizeItem(before), tags: ['inventory']
     });
 
-    return res.status(200).json({
-      success: true,
-      message: 'Bien eliminado exitosamente',
-    });
+    return res.status(200).json({ success: true, message: 'Bien eliminado exitosamente' });
   } catch (err) {
     console.error('Error al eliminar bien:', err);
-    await logActivity({
-      req, action: 'INVENTORY_DELETE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
+    await logActivity({ req, action: 'INVENTORY_DELETE_FAIL', entity: 'INVENTORY_ITEM', entityId: req.params.itemId,
+      statusCode: 500, success: false, error: err?.message, tags: ['inventory'] });
     return handleErrorResponse(res, 500, 'Error al eliminar bien', err?.message);
   }
 };
 
-/* ====================== Transferencias (Solicitudes) ====================== */
-export const createTransferRequest = async (req, res) => {
+/* ============================================================================ */
+/*     TRANSFER — Crear invitación (correo) y Confirmación con código          */
+/* ============================================================================ */
+export const createOrConfirmTransferRequest = async (req, res) => {
   try {
     const { itemId } = req.params;
-    const { toUser, motivo } = req.body;
+    const { toUser, motivo, inviteCode } = req.body;
 
     if (!toUser) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST', entityId: null,
-        statusCode: 400, success: false, error: 'toUser es obligatorio', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST',
+        statusCode: 400, success: false, error: 'toUser es obligatorio', tags: ['inventory'] });
       return handleErrorResponse(res, 400, 'toUser es obligatorio');
     }
 
     const item = await InventoryItem.findById(itemId).lean();
     if (!item) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST', entityId: null,
-        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST',
+        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory'] });
       return handleErrorResponse(res, 404, 'Bien no encontrado');
     }
 
     const fromUser = req.user?.id || req.user?._id;
     if (!fromUser) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST', entityId: null,
-        statusCode: 401, success: false, error: 'No autenticado', tags: ['inventory']
-      });
+      await logActivity({ req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST',
+        statusCode: 401, success: false, error: 'No autenticado', tags: ['inventory'] });
       return handleErrorResponse(res, 401, 'No autenticado');
+    }
+
+    // Fase 1: Crear invitación y enviar código (sin pedirlo en front)
+    if (!String(inviteCode || '').trim()) {
+      // Cierra pendientes abiertos previos del mismo par item/toUser
+      await TransferPendingCode.updateMany(
+        { itemId, toUserId: toUser, resolvedAt: { $exists: false } },
+        { $set: { resolvedAt: new Date() } }
+      );
+
+      const code = genCode();
+      const expiresAt = nowPlus(INVITE_TTL_MS);
+      const invite = await TransferPendingCode.create({
+        itemId,
+        fromUserId: fromUser,
+        toUserId: toUser,
+        motivo: motivo || '',
+        codePlain: code,
+        codeHash: crypto.createHash('sha256').update(code).digest('hex'),
+        expiresAt,
+        sentEmail: false,
+      });
+
+      // Enviar correo
+      let sent = false;
+      try {
+        const toUserDoc = await User.findById(toUser).lean();
+        if (!toUserDoc?.email) throw new Error('Usuario destino sin email');
+        await sendMail({
+          to: toUserDoc.email,
+          subject: `Código de confirmación para traslado de bien: ${item?.noBien || ''}`,
+          text:
+`Hola ${toUserDoc?.nombre || ''},
+
+Has sido propuesto como nuevo responsable del bien "${item?.nombreBien || item?.noBien}".
+Código de confirmación: ${code}
+Este código vence el ${expiresAt.toLocaleString('es-GT')}.
+
+Motivo: ${motivo || '—'}
+
+Atentamente,
+Sistema de Inventario`,
+        });
+        sent = true;
+      } catch (mailErr) {
+        console.error('Error enviando correo de invitación:', mailErr);
+      }
+
+      if (sent) {
+        await TransferPendingCode.findByIdAndUpdate(invite._id, { $set: { sentEmail: true } });
+      }
+
+      await logActivity({
+        req, action: 'INVENTORY_TR_INVITE', entity: 'TRANSFER_PENDING_CODE', entityId: invite._id,
+        statusCode: 201, success: true, message: 'Invitación generada',
+        after: { id: invite._id, itemId, toUser, expiresAt, sentEmail: sent }, tags: ['inventory']
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: 'Invitación generada y correo enviado (si fue posible)',
+        invite: {
+          id: invite._id,
+          itemId,
+          toUser,
+          expiresAt,
+          sentEmail: sent,
+          devCode: process.env.NODE_ENV !== 'production' ? code : undefined,
+        },
+      });
+    }
+
+    // Fase 2: Confirmación con código (se usa desde el flujo del destinatario)
+    const codeStr = String(inviteCode).trim();
+    const codeHash = crypto.createHash('sha256').update(codeStr).digest('hex');
+
+    const pending = await TransferPendingCode.findOne({
+      itemId,
+      toUserId: toUser,
+      $or: [
+        { codeHash },
+        { codePlain: codeStr },
+      ],
+      resolvedAt: { $exists: false },
+      expiresAt: { $gt: new Date() },
+    });
+
+    if (!pending) {
+      await logActivity({ req, action: 'INVENTORY_TR_CONFIRM_FAIL', entity: 'TRANSFER_REQUEST',
+        statusCode: 400, success: false, error: 'Código inválido o expirado', tags: ['inventory'] });
+      return handleErrorResponse(res, 400, 'Código inválido o expirado');
     }
 
     const tr = await TransferRequest.create({
@@ -490,50 +503,42 @@ export const createTransferRequest = async (req, res) => {
       motivo,
       status: TRANSFER_STATUS.PENDING,
     });
+    await TransferPendingCode.findByIdAndUpdate(pending._id, { $set: { resolvedAt: new Date(), inviteId: tr._id } });
 
     const created = await TransferRequest.findById(tr._id)
-      .populate('item', 'noBien nombreBien responsable responsableId')
+      .populate('item', 'noBien nombreBien responsable responsableId descripcion numeroTarjeta monto')
       .populate('fromUser', 'email nombre')
       .populate('toUser', 'email nombre')
       .lean();
 
     await logActivity({
-      req, action: 'INVENTORY_TR_CREATE', entity: 'TRANSFER_REQUEST', entityId: tr._id,
-      statusCode: 201, success: true, message: 'Solicitud de traslado creada',
+      req, action: 'INVENTORY_TR_CONFIRM', entity: 'TRANSFER_REQUEST', entityId: tr._id,
+      statusCode: 201, success: true, message: 'Solicitud creada tras confirmación de código',
       after: created, tags: ['inventory']
     });
 
-    return res.status(201).json({
-      success: true,
-      message: 'Solicitud de traslado creada',
-      request: created,
-    });
+    return res.status(201).json({ success: true, message: 'Solicitud creada', request: created });
   } catch (err) {
-    console.error('Error al crear solicitud de traslado:', err);
-    await logActivity({
-      req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST',
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
-    return handleErrorResponse(res, 500, 'Error al crear solicitud', err?.message);
+    console.error('Error en createOrConfirmTransferRequest:', err);
+    await logActivity({ req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST',
+      statusCode: 500, success: false, error: err?.message, tags: ['inventory'] });
+    return handleErrorResponse(res, 500, 'Error al procesar la solicitud', err?.message);
   }
 };
 
-export const getTransferRequests = async (req, res) => {
+/* ============================================================================ */
+/*               TRANSFER — Listados / Detalle / Aprobación / Rechazo          */
+/* ============================================================================ */
+export const getTransferRequestsList = async (req, res) => {
   try {
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-    res.set('Surrogate-Control', 'no-store');
-
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
     const skip = (page - 1) * limit;
 
     const filter = {};
     const isInv = userHasInventoryRole(req);
-
     const { status, item } = req.query;
-    if (status) filter.status = String(status);
+    if (status) filter.status = String(status).toUpperCase();
     if (item) filter.item = String(item);
 
     if (!isInv) {
@@ -547,17 +552,12 @@ export const getTransferRequests = async (req, res) => {
         .sort('-createdAt')
         .skip(skip)
         .limit(limit)
-        .populate('item', 'noBien nombreBien responsable responsableId')
+        .populate('item', 'noBien nombreBien responsable responsableId descripcion numeroTarjeta monto')
         .populate('fromUser', 'email nombre')
         .populate('toUser', 'email nombre')
         .populate('decidedBy', 'email nombre')
         .lean(),
     ]);
-
-    await logActivity({
-      req, action: 'INVENTORY_TR_LIST', entity: 'TRANSFER_REQUEST',
-      statusCode: 200, success: true, message: `Solicitudes obtenidas (${docs.length})`, tags: ['inventory']
-    });
 
     return res.status(200).json({
       success: true,
@@ -566,87 +566,107 @@ export const getTransferRequests = async (req, res) => {
       requests: docs,
     });
   } catch (err) {
-    console.error('Error al obtener solicitudes:', err);
-    await logActivity({
-      req, action: 'INVENTORY_TR_LIST_FAIL', entity: 'TRANSFER_REQUEST',
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
+    console.error('Error en getTransferRequestsList:', err);
     return handleErrorResponse(res, 500, 'Error al obtener solicitudes', err?.message);
+  }
+};
+
+export const getTransferRequestById = async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const tr = await TransferRequest.findById(requestId).lean();
+    if (!tr) return handleErrorResponse(res, 404, 'Solicitud no encontrada');
+    return res.status(200).json({ success: true, request: tr });
+  } catch (err) {
+    console.error('Error en getTransferRequestById:', err);
+    return handleErrorResponse(res, 500, 'Error al obtener solicitud', err?.message);
+  }
+};
+
+export const getTransferRequestDetail = async (req, res) => {
+  try {
+    const { requestId } = req.params;
+    const tr = await TransferRequest.findById(requestId)
+      .populate('item', 'noBien nombreBien responsable responsableId descripcion numeroTarjeta monto')
+      .populate('fromUser', 'email nombre')
+      .populate('toUser', 'email nombre')
+      .populate('decidedBy', 'email nombre')
+      .lean();
+    if (!tr) return handleErrorResponse(res, 404, 'Solicitud no encontrada');
+    return res.status(200).json({ success: true, request: tr });
+  } catch (err) {
+    console.error('Error en getTransferRequestDetail:', err);
+    return handleErrorResponse(res, 500, 'Error al obtener detalle', err?.message);
+  }
+};
+
+/* === SOLO URL (sin file/base64) === */
+export const uploadTransferSignedDoc = async (req, res) => {
+  try {
+    const { requestId } = req.params;
+
+    const tr = await TransferRequest.findById(requestId);
+    if (!tr) return handleErrorResponse(res, 404, 'Solicitud no encontrada');
+
+    const url = String(req.body?.url || '').trim();
+    if (!url) return handleErrorResponse(res, 400, 'Debes proporcionar url');
+
+    tr.signedDocUrl = url;
+    await tr.save();
+
+    return res.status(200).json({ success: true, message: 'Documento guardado', data: { url } });
+  } catch (err) {
+    console.error('Error en uploadTransferSignedDoc:', err);
+    return handleErrorResponse(res, 500, 'Error al guardar documento', err?.message);
   }
 };
 
 export const approveTransferRequest = async (req, res) => {
   try {
     if (!userHasInventoryRole(req)) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_APPROVE_FAIL', entity: 'TRANSFER_REQUEST', entityId: req.params.requestId,
-        statusCode: 403, success: false, error: 'No autorizado', tags: ['inventory']
-      });
       return handleErrorResponse(res, 403, 'No autorizado para aprobar solicitudes');
     }
-
     const approverId = req.user?.id || req.user?._id;
     const { requestId } = req.params;
 
-    const tr = await TransferRequest.findById(requestId);
-    if (!tr) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_APPROVE_FAIL', entity: 'TRANSFER_REQUEST', entityId: requestId,
-        statusCode: 404, success: false, error: 'Solicitud no encontrada', tags: ['inventory']
-      });
-      return handleErrorResponse(res, 404, 'Solicitud no encontrada');
-    }
+    const tr = await TransferRequest.findById(requestId)
+      .populate('item')
+      .populate('toUser')
+      .lean();
+    if (!tr) return handleErrorResponse(res, 404, 'Solicitud no encontrada');
 
     if (tr.status !== TRANSFER_STATUS.PENDING) {
-      const populated = await TransferRequest.findById(tr._id)
+      const populated = await TransferRequest.findById(requestId)
         .populate('item', 'noBien nombreBien descripcion numeroTarjeta monto responsable responsableId')
         .populate('fromUser', 'email nombre')
         .populate('toUser', 'email nombre')
         .populate('decidedBy', 'email nombre')
         .lean();
-
-      await logActivity({
-        req, action: 'INVENTORY_TR_APPROVE', entity: 'TRANSFER_REQUEST', entityId: tr._id,
-        statusCode: 200, success: true, message: 'Solicitud ya resuelta', after: populated, tags: ['inventory']
-      });
-
-      return res.status(200).json({
-        success: true,
-        message: 'La solicitud ya fue resuelta',
-        request: populated,
-        alreadyResolved: true,
-      });
+      return res.status(200).json({ success: true, message: 'La solicitud ya fue resuelta', request: populated, alreadyResolved: true });
     }
 
-    const item = await InventoryItem.findById(tr.item);
-    if (!item) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_APPROVE_FAIL', entity: 'TRANSFER_REQUEST', entityId: tr._id,
-        statusCode: 404, success: false, error: 'Bien no encontrado', tags: ['inventory']
-      });
-      return handleErrorResponse(res, 404, 'Bien no encontrado');
+    // Exigir documento firmado (URL)
+    const trDoc = await TransferRequest.findById(requestId).lean();
+    if (!trDoc?.signedDocUrl) {
+      return handleErrorResponse(res, 400, 'Debe adjuntar la URL del documento firmado antes de aprobar');
     }
 
-    const to = await User.findById(tr.toUser).lean();
-    if (!to) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_APPROVE_FAIL', entity: 'TRANSFER_REQUEST', entityId: tr._id,
-        statusCode: 404, success: false, error: 'Usuario destino no encontrado', tags: ['inventory']
-      });
-      return handleErrorResponse(res, 404, 'Usuario destino no encontrado');
-    }
+    const item = await InventoryItem.findById(tr.item._id);
+    if (!item) return handleErrorResponse(res, 404, 'Bien no encontrado');
+
+    const to = await User.findById(tr.toUser._id).lean();
+    if (!to) return handleErrorResponse(res, 404, 'Usuario destino no encontrado');
 
     const beforeItem = item.toObject();
     item.responsableId = to._id;
     item.responsable = userLabelFromDoc(to, to._id);
     await item.save();
 
-    tr.status = TRANSFER_STATUS.APPROVED;
-    tr.decidedBy = approverId;
-    tr.decidedAt = new Date();
-    await tr.save();
+    await TransferRequest.findByIdAndUpdate(requestId, {
+      $set: { status: TRANSFER_STATUS.APPROVED, decidedBy: approverId, decidedAt: new Date() }
+    });
 
-    const populated = await TransferRequest.findById(tr._id)
+    const populated = await TransferRequest.findById(requestId)
       .populate('item', 'noBien nombreBien descripcion numeroTarjeta monto responsable responsableId')
       .populate('fromUser', 'email nombre')
       .populate('toUser', 'email nombre')
@@ -654,10 +674,9 @@ export const approveTransferRequest = async (req, res) => {
       .lean();
 
     await logActivity({
-      req, action: 'INVENTORY_TR_APPROVE', entity: 'TRANSFER_REQUEST', entityId: tr._id,
+      req, action: 'INVENTORY_TR_APPROVE', entity: 'TRANSFER_REQUEST', entityId: requestId,
       statusCode: 200, success: true, message: 'Solicitud aprobada y responsable actualizado',
-      before: { item: sanitizeItem(beforeItem) }, after: { item: sanitizeItem(item) },
-      tags: ['inventory']
+      before: { item: sanitizeItem(beforeItem) }, after: { item: sanitizeItem(item) }, tags: ['inventory']
     });
 
     return res.status(200).json({
@@ -668,10 +687,6 @@ export const approveTransferRequest = async (req, res) => {
     });
   } catch (err) {
     console.error('Error al aprobar solicitud:', err);
-    await logActivity({
-      req, action: 'INVENTORY_TR_APPROVE_FAIL', entity: 'TRANSFER_REQUEST', entityId: req.params.requestId,
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
     return handleErrorResponse(res, 500, 'Error al aprobar solicitud', err?.message);
   }
 };
@@ -679,25 +694,14 @@ export const approveTransferRequest = async (req, res) => {
 export const rejectTransferRequest = async (req, res) => {
   try {
     if (!userHasInventoryRole(req)) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_REJECT_FAIL', entity: 'TRANSFER_REQUEST', entityId: req.params.requestId,
-        statusCode: 403, success: false, error: 'No autorizado', tags: ['inventory']
-      });
       return handleErrorResponse(res, 403, 'No autorizado para rechazar solicitudes');
     }
-
     const approverId = req.user?.id || req.user?._id;
     const { requestId } = req.params;
     const { reason } = req.body;
 
     const tr = await TransferRequest.findById(requestId);
-    if (!tr) {
-      await logActivity({
-        req, action: 'INVENTORY_TR_REJECT_FAIL', entity: 'TRANSFER_REQUEST', entityId: requestId,
-        statusCode: 404, success: false, error: 'Solicitud no encontrada', tags: ['inventory']
-      });
-      return handleErrorResponse(res, 404, 'Solicitud no encontrada');
-    }
+    if (!tr) return handleErrorResponse(res, 404, 'Solicitud no encontrada');
 
     if (tr.status !== TRANSFER_STATUS.PENDING) {
       const populated = await TransferRequest.findById(tr._id)
@@ -706,18 +710,7 @@ export const rejectTransferRequest = async (req, res) => {
         .populate('toUser', 'email nombre')
         .populate('decidedBy', 'email nombre')
         .lean();
-
-      await logActivity({
-        req, action: 'INVENTORY_TR_REJECT', entity: 'TRANSFER_REQUEST', entityId: tr._id,
-        statusCode: 200, success: true, message: 'Solicitud ya resuelta', after: populated, tags: ['inventory']
-      });
-
-      return res.status(200).json({
-        success: true,
-        message: 'La solicitud ya fue resuelta',
-        request: populated,
-        alreadyResolved: true,
-      });
+      return res.status(200).json({ success: true, message: 'La solicitud ya fue resuelta', request: populated, alreadyResolved: true });
     }
 
     tr.status = TRANSFER_STATUS.REJECTED;
@@ -739,18 +732,115 @@ export const rejectTransferRequest = async (req, res) => {
       after: populated, tags: ['inventory']
     });
 
-    return res.status(200).json({
-      success: true,
-      message: 'Solicitud rechazada',
-      request: populated,
-      alreadyResolved: false,
-    });
+    return res.status(200).json({ success: true, message: 'Solicitud rechazada', request: populated, alreadyResolved: false });
   } catch (err) {
     console.error('Error al rechazar solicitud:', err);
-    await logActivity({
-      req, action: 'INVENTORY_TR_REJECT_FAIL', entity: 'TRANSFER_REQUEST', entityId: req.params.requestId,
-      statusCode: 500, success: false, error: err?.message, tags: ['inventory']
-    });
     return handleErrorResponse(res, 500, 'Error al rechazar solicitud', err?.message);
+  }
+};
+
+/* ============================================================================ */
+/*                      PENDING CODES — CRUD para listado                       */
+/* ============================================================================ */
+export const listTransferPendingCodes = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
+    const skip = (page - 1) * limit;
+
+    const { status } = req.query; // ALL | OPEN | CLOSED
+    const filter = {};
+    if (status === 'OPEN') filter.resolvedAt = { $exists: false };
+    if (status === 'CLOSED') filter.resolvedAt = { $exists: true };
+
+    const [total, docs] = await Promise.all([
+      TransferPendingCode.countDocuments(filter),
+      TransferPendingCode.find(filter).sort('-createdAt').skip(skip).limit(limit).lean(),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
+      items: docs.map((r) => ({
+        id: r._id,
+        inviteId: r.inviteId || null,
+        itemId: r.itemId,
+        fromUserId: r.fromUserId,
+        toUserId: r.toUserId,
+        motivo: r.motivo,
+        codePlain: r.codePlain, // si no quieres exponerlo, quítalo
+        expiresAt: r.expiresAt,
+        sentEmail: r.sentEmail,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        resolvedAt: r.resolvedAt,
+      })),
+    });
+  } catch (err) {
+    console.error('Error listTransferPendingCodes:', err);
+    return handleErrorResponse(res, 500, 'Error al listar pendientes', err?.message);
+  }
+};
+
+export const getTransferPendingCodeById = async (req, res) => {
+  try {
+    const { pendingId } = req.params;
+    const r = await TransferPendingCode.findById(pendingId).lean();
+    if (!r) return handleErrorResponse(res, 404, 'Pendiente no encontrado');
+    return res.status(200).json({
+      success: true,
+      item: {
+        id: r._id,
+        inviteId: r.inviteId || null,
+        itemId: r.itemId,
+        fromUserId: r.fromUserId,
+        toUserId: r.toUserId,
+        motivo: r.motivo,
+        codePlain: r.codePlain,
+        expiresAt: r.expiresAt,
+        sentEmail: r.sentEmail,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        resolvedAt: r.resolvedAt,
+      }
+    });
+  } catch (err) {
+    console.error('Error getTransferPendingCodeById:', err);
+    return handleErrorResponse(res, 500, 'Error al obtener pendiente', err?.message);
+  }
+};
+
+export const updateTransferPendingCode = async (req, res) => {
+  try {
+    const { pendingId } = req.params;
+    const update = {};
+    if (typeof req.body?.codePlain === 'string') {
+      update.codePlain = req.body.codePlain.trim();
+      update.codeHash = crypto.createHash('sha256').update(update.codePlain).digest('hex');
+    }
+    if (req.body?.expiresAt) update.expiresAt = new Date(req.body.expiresAt);
+    if (typeof req.body?.sentEmail === 'boolean') update.sentEmail = req.body.sentEmail;
+    if (req.body?.resolvedAt === null) update.resolvedAt = undefined;
+    if (req.body?.resolvedAt) update.resolvedAt = new Date(req.body.resolvedAt);
+
+    const r = await TransferPendingCode.findByIdAndUpdate(pendingId, { $set: update }, { new: true }).lean();
+    if (!r) return handleErrorResponse(res, 404, 'Pendiente no encontrado');
+
+    return res.status(200).json({ success: true, item: r });
+  } catch (err) {
+    console.error('Error updateTransferPendingCode:', err);
+    return handleErrorResponse(res, 500, 'Error al actualizar pendiente', err?.message);
+  }
+};
+
+export const deleteTransferPendingCode = async (req, res) => {
+  try {
+    const { pendingId } = req.params;
+    const r = await TransferPendingCode.findByIdAndDelete(pendingId).lean();
+    if (!r) return handleErrorResponse(res, 404, 'Pendiente no encontrado');
+    return res.status(200).json({ success: true, message: 'Pendiente eliminado' });
+  } catch (err) {
+    console.error('Error deleteTransferPendingCode:', err);
+    return handleErrorResponse(res, 500, 'Error al eliminar pendiente', err?.message);
   }
 };
