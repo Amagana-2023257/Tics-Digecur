@@ -27,11 +27,15 @@ router.post('/', validateJWT, canUseCardex, createCardex);
 // Actualizar (requiere dept + rol)
 router.put('/:cardexId', validateJWT, canUseCardex, updateCardex);
 
-// Listar / Obtener 
-router.get('/', validateJWT, getAllCardex);                 // solo lectura: JWT
-router.get('/:cardexId', validateJWT, getCardexById);       // solo lectura: JWT
 
-router.delete('/:cardexId', validateJWT, canUseCardex, deleteCardex); // requiere dept + rol
+
+// Listar / Obtener 
+router.get('/', validateJWT, getAllCardex);              
+router.get('/:cardexId', validateJWT, getCardexById);    
+
+
+
+router.delete('/:cardexId', validateJWT, canUseCardex, deleteCardex);
 
 
 export default router;

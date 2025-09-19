@@ -35,7 +35,7 @@ router.post(
   createUser
 );
 
-router.get('/', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), getAllUsers);
+router.get('/', validateJWT, getAllUsers);
 router.get('/stats', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), getUsersStats);
 router.get('/export', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), exportUsersCsv);
 router.post('/bulk/active', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), bulkSetActive);
@@ -49,7 +49,7 @@ router.patch(
 );
 
 // --- Lectura/edición individual (propio usuario o dept+rol admin-like) ---
-router.get('/:userId', validateJWT, selfOrDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), getUserById);
+router.get('/:userId', validateJWT, getUserById);
 
 router.put(
   '/:userId',
