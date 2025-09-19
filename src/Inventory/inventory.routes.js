@@ -19,12 +19,6 @@ import {
   uploadTransferSignedDoc,
   approveTransferRequest,
   rejectTransferRequest,
-
-  // Pending codes
-  listTransferPendingCodes,
-  getTransferPendingCodeById,
-  updateTransferPendingCode,
-  deleteTransferPendingCode,
 } from './inventory.controller.js';
 
 import {
@@ -35,78 +29,30 @@ import {
   updateItemValidator,
   setActiveValidator,
 
-  // ===== Transfer requests (nombres EXACTOS según validators.js)
+  // ===== Transfer requests 
   createOrConfirmTransferRequestValidator,
   approveTransferRequestValidator,
   rejectTransferRequestValidator,
-  getTransferRequestsListValidator,   // (alias disponible: listTransferRequestsValidator)
+  getTransferRequestsListValidator,   
   getTransferRequestByIdValidator,
   getTransferRequestDetailValidator,
-  uploadTransferSignedDocValidator,   // (alias disponible: uploadSignedDocValidator)
+  uploadTransferSignedDocValidator,  
 
-  // ===== Pending codes
-  listTransferPendingCodesValidator,
-  getTransferPendingCodeByIdValidator,
-  updateTransferPendingCodeValidator,
-  deleteTransferPendingCodeValidator,
 } from '../middlewares/inventory.validators.js';
 
 import { validateJWT } from '../middlewares/validate-jwt.js';
-import { requireRolesAny } from '../middlewares/validate-roles.js';
+import { requireDeptAndRole } from '../middlewares/authorize-dept-role.js';
 
 const router = Router();
-const upload = multer(); // memoryStorage por defecto
+const upload = multer(); 
 
-// Roles con permiso de inventario
-const INVENTARIO_ROLES = ['ADMIN', 'DIRECTOR', 'INVENTARIO'];
-
-/* =========================================================================
-   ⚠️ ORDEN IMPORTANTE:
-   1) Primero rutas ESPECÍFICAS (sin params) y con params distintos a :itemId
-   2) Después rutas /transfer-requests/:requestId y /transfer-pending-codes/:pendingId
-   3) AL FINAL rutas con :itemId (y además restringidas por REGEX)
-   Esto evita que '/transfer-pending-codes' matchee '/:itemId' y dispare 422.
-   ========================================================================= */
-
-// -------------------------------------------------------------------------
-// INVENTORY — Transfer Pending Codes (primero)
-// -------------------------------------------------------------------------
-router.get(
-  '/transfer-pending-codes',
-  validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
-  listTransferPendingCodesValidator,
-  listTransferPendingCodes
-);
-
-router.get(
-  '/transfer-pending-codes/:pendingId',
-  validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
-  getTransferPendingCodeByIdValidator,
-  getTransferPendingCodeById
-);
-
-router.patch(
-  '/transfer-pending-codes/:pendingId',
-  validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
-  updateTransferPendingCodeValidator,
-  updateTransferPendingCode
-);
-
-router.delete(
-  '/transfer-pending-codes/:pendingId',
-  validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
-  deleteTransferPendingCodeValidator,
-  deleteTransferPendingCode
-);
+const INV_DEPTS = ['AREA FINANCIERA', 'DIRECCION', 'DESAROLLO'];
+const INV_ROLES = ['ADMIN', 'DIRECTOR', 'JEFE', 'TECNICO'];
 
 // -------------------------------------------------------------------------
 // INVENTORY — Transfer Requests (luego)
 // -------------------------------------------------------------------------
-// Listado (admin ve todo; sin rol ve propias en el controller)
+// Listado (se mantiene lectura con solo JWT, como antes)
 router.get(
   '/transfer-requests/list',
   validateJWT,
@@ -114,7 +60,7 @@ router.get(
   getTransferRequestsList
 );
 
-// Detalle simple
+// Detalle simple (solo JWT)
 router.get(
   '/transfer-requests/:requestId',
   validateJWT,
@@ -122,7 +68,7 @@ router.get(
   getTransferRequestById
 );
 
-// Detalle extendido
+// Detalle extendido (solo JWT)
 router.get(
   '/transfer-requests/:requestId/detail',
   validateJWT,
@@ -130,21 +76,21 @@ router.get(
   getTransferRequestDetail
 );
 
-// Subir/guardar documento firmado (PDF) — file/url/pdfBase64
+// Subir/guardar documento firmado (PDF) — requiere dept+rol
 router.post(
   '/transfer-requests/:requestId/signed-doc',
   validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
-  upload.single('file'),               // ⬅️ primero el upload
-  uploadTransferSignedDocValidator,    // ⬅️ luego el validador (usa req.file/url/base64)
+  requireDeptAndRole(INV_DEPTS, INV_ROLES),
+  upload.single('file'),              
+  uploadTransferSignedDocValidator,   
   uploadTransferSignedDoc
 );
 
-// Aprobar / Rechazar (requiere rol)
+// Aprobar / Rechazar (requiere dept+rol)
 router.patch(
   '/transfer-requests/:requestId/approve',
   validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
+  requireDeptAndRole(INV_DEPTS, INV_ROLES),
   approveTransferRequestValidator,
   approveTransferRequest
 );
@@ -152,7 +98,7 @@ router.patch(
 router.patch(
   '/transfer-requests/:requestId/reject',
   validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
+  requireDeptAndRole(INV_DEPTS, INV_ROLES),
   rejectTransferRequestValidator,
   rejectTransferRequest
 );
@@ -160,12 +106,14 @@ router.patch(
 // -------------------------------------------------------------------------
 // INVENTORY — Bienes (CRUD sin :itemId primero)
 // -------------------------------------------------------------------------
+// Listado de bienes (solo JWT, como antes)
 router.get('/', validateJWT, listItemsValidator, getAllItems);
 
+// Crear bien (requiere dept+rol)
 router.post(
   '/',
   validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
+  requireDeptAndRole(INV_DEPTS, INV_ROLES),
   createItemValidator,
   createItem
 );
@@ -180,14 +128,14 @@ const ITEM_ID_REGEX =
 router.get(
   `/:itemId(${ITEM_ID_REGEX})`,
   validateJWT,
-  getByIdValidator,           // ya flexible (ObjectId o UUID)
+  getByIdValidator,        
   getItemById
 );
 
 router.put(
   `/:itemId(${ITEM_ID_REGEX})`,
   validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
+  requireDeptAndRole(INV_DEPTS, INV_ROLES),
   updateItemValidator,
   updateItem
 );
@@ -195,7 +143,7 @@ router.put(
 router.patch(
   `/:itemId(${ITEM_ID_REGEX})/active`,
   validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
+  requireDeptAndRole(INV_DEPTS, INV_ROLES),
   setActiveValidator,
   setActive
 );
@@ -203,12 +151,11 @@ router.patch(
 router.delete(
   `/:itemId(${ITEM_ID_REGEX})`,
   validateJWT,
-  requireRolesAny(...INVENTARIO_ROLES),
+  requireDeptAndRole(INV_DEPTS, INV_ROLES),
   getByIdValidator,
   deleteItem
 );
 
-// Crear invitación o confirmar con código de traslado (por item)
 router.post(
   `/:itemId(${ITEM_ID_REGEX})/transfer-requests`,
   validateJWT,

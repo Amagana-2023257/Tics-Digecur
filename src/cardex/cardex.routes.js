@@ -1,39 +1,37 @@
+// src/cardex/cardex.routes.js
 import { Router } from 'express';
 import { validateJWT } from '../middlewares/validate-jwt.js';
-import { hasRoles } from '../middlewares/validate-roles.js';
+import { requireDeptAndRole } from '../middlewares/authorize-dept-role.js';
 import {
   createCardex, getAllCardex, getCardexById,
   updateCardex, deleteCardex,
-  streamCardexFile, downloadCardexFile
 } from './cardex.controller.js';
 
 const router = Router();
-const CARD_ROLES = ['ADMIN', 'DIRECTOR', 'MATERIALES'];
-const canUseCardex = hasRoles(...CARD_ROLES);
 
-/* =========================================================
-   Sin subida de archivos — solo se recibe onedriveUrl en body
-   Body esperado en create/update:
-   {
-     titulo, descripcion, categoria, tags,
-     onedriveUrl,              // ← requerido
-     fechaDocumento?, anioDocumento?,
-     originalName?, mimeType?, size?,
-     isActive?
-   }
-   ========================================================= */
+/**
+ * Autorización Cardex:
+ * - Departamentos habilitados: área de materiales (operativo), dirección (jefatura) y desarrollo (superadmin).
+ * - Roles habilitados: operativos y jefaturas.
+ *
+ * Ajusta a tu organigrama si lo necesitas.
+ */
+const CARDEX_DEPTS = ['AREA DE MATERIALES EDUCATIVOS', 'DIRECCION', 'DESAROLLO'];
+const CARDEX_ROLES = ['ADMIN', 'DIRECTOR', 'JEFE', 'TECNICO', 'ASISTENTE'];
+const canUseCardex = requireDeptAndRole(CARDEX_DEPTS, CARDEX_ROLES);
 
-// Crear
+
+// Crear (requiere dept + rol)
 router.post('/', validateJWT, canUseCardex, createCardex);
 
-// Actualizar
+// Actualizar (requiere dept + rol)
 router.put('/:cardexId', validateJWT, canUseCardex, updateCardex);
 
-// Listar / Obtener / Eliminar / Ver / Descargar
-router.get('/', validateJWT, getAllCardex);
-router.get('/:cardexId', validateJWT, getCardexById);
-router.delete('/:cardexId', validateJWT, canUseCardex, deleteCardex);
-router.get('/:cardexId/view', validateJWT, streamCardexFile);
-router.get('/:cardexId/download', validateJWT, downloadCardexFile);
+// Listar / Obtener 
+router.get('/', validateJWT, getAllCardex);                 // solo lectura: JWT
+router.get('/:cardexId', validateJWT, getCardexById);       // solo lectura: JWT
+
+router.delete('/:cardexId', validateJWT, canUseCardex, deleteCardex); // requiere dept + rol
+
 
 export default router;

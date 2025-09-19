@@ -1,25 +1,7 @@
-import fs from 'fs';
-import fsp from 'fs/promises';
-import path from 'path';
+// src/cardex/cardex.controller.js
 import Cardex, { CARDEX_CATS } from './cardex.model.js';
 import { handleErrorResponse } from '../middlewares/handle-errors.js';
 import { logActivity } from '../movements/movement.controller.js';
-
-/* =============================================================================
-   Config legacy (solo para lectura de archivos viejos, NO subimos nada)
-============================================================================= */
-export const CARDEX_UPLOAD_DIR =
-  process.env.CARDEX_UPLOAD_DIR && String(process.env.CARDEX_UPLOAD_DIR).trim()
-    ? process.env.CARDEX_UPLOAD_DIR
-    : path.resolve(process.cwd(), 'uploads', 'cardex');
-
-async function ensureUploadDir() {
-  try { await fsp.mkdir(CARDEX_UPLOAD_DIR, { recursive: true }); } catch {}
-}
-
-function toLegacyFileUrl(fileName) {
-  return `/files/cardex/${encodeURIComponent(fileName)}`;
-}
 
 /* =============================================================================
    Helpers
@@ -69,8 +51,9 @@ function isOneDriveFileUrl(urlStr = '') {
     const u = new URL(String(urlStr));
     const host = u.hostname.toLowerCase();
 
-    if (host === '1drv.ms') return !u.pathname.startsWith('/f/');
-    if (host.endsWith('sharepoint.com')) return u.pathname.startsWith('/:') && !u.pathname.startsWith('/:f:');
+    if (host === '1drv.ms') return !u.pathname.startsWith('/f/'); // /f/ => folders
+    if (host.endsWith('sharepoint.com'))
+      return u.pathname.startsWith('/:') && !u.pathname.startsWith('/:f:'); // :f: => folder
     if (host === 'onedrive.live.com') {
       const sp = u.searchParams;
       return sp.has('resid') || sp.has('id');
@@ -81,51 +64,33 @@ function isOneDriveFileUrl(urlStr = '') {
   }
 }
 
-/** Devuelve la URL de descarga (añade download=1 preservando query existente) */
-function toDownloadUrl(u = '') {
-  try {
-    const url = new URL(String(u));
-    // OneDrive/SharePoint aceptan download=1 para forzar descarga
-    url.searchParams.set('download', '1');
-    return url.toString();
-  } catch {
-    return u;
-  }
-}
-
 function sanitizeCardex(d) {
   if (!d) return null;
-
   const hasOneDrive = !!d.onedriveUrl;
-  const legacyLocal = !!d.fileName;
 
-  const base = {
+  return {
     id: d._id || d.id,
     titulo: d.titulo,
     descripcion: d.descripcion,
     categoria: d.categoria,
     tags: d.tags || [],
-    // Fuente principal
     provider: d.provider || (hasOneDrive ? 'onedrive' : null),
     onedriveUrl: hasOneDrive ? d.onedriveUrl : null,
-    // Compat: exponer fileUrl como la URL principal usable por el front
-    fileUrl: hasOneDrive ? d.onedriveUrl : (legacyLocal ? toLegacyFileUrl(d.fileName) : null),
-
-    // Legacy metadata (si existiera)
-    fileName: d.fileName || null,
+    // Para UI
+    viewUrl: hasOneDrive ? d.onedriveUrl : null,
+    downloadUrl: hasOneDrive ? `${d.onedriveUrl}${d.onedriveUrl.includes('?') ? '&' : '?'}download=1` : null,
+    // Metadatos opcionales
     originalName: d.originalName || null,
     mimeType: d.mimeType || null,
     size: d.size ?? null,
-
-    // Nuevo: helpers para vista/descarga
-    viewUrl: hasOneDrive ? d.onedriveUrl : (legacyLocal ? toLegacyFileUrl(d.fileName) : null),
-    downloadUrl: hasOneDrive ? toDownloadUrl(d.onedriveUrl) : (legacyLocal ? toLegacyFileUrl(d.fileName) : null),
-
+    // Fechas
     fechaDocumento: d.fechaDocumento || null,
-    anioDocumento: typeof d.anioDocumento === 'number'
-      ? d.anioDocumento
-      : (d.fechaDocumento ? new Date(d.fechaDocumento).getUTCFullYear() : null),
-
+    anioDocumento:
+      typeof d.anioDocumento === 'number'
+        ? d.anioDocumento
+        : d.fechaDocumento
+        ? new Date(d.fechaDocumento).getUTCFullYear()
+        : null,
     uploadedBy: d.uploadedBy ? String(d.uploadedBy) : null,
     isActive: !!d.isActive,
     views: d.views ?? 0,
@@ -133,8 +98,6 @@ function sanitizeCardex(d) {
     createdAt: d.createdAt,
     updatedAt: d.updatedAt,
   };
-
-  return base;
 }
 
 function buildFilter(q = {}) {
@@ -184,14 +147,11 @@ function buildFilter(q = {}) {
 }
 
 /* =============================================================================
-   CRUD (sin subida de PDF — solo URL de OneDrive)
+   CRUD (solo URL de OneDrive; sin archivos locales)
 ============================================================================= */
 
 export const createCardex = async (req, res) => {
   try {
-    // No subimos nada; mantenemos dir legacy por si luego se visualizan antiguos
-    await ensureUploadDir();
-
     const {
       titulo,
       descripcion,
@@ -206,15 +166,21 @@ export const createCardex = async (req, res) => {
       size,         // opcional
     } = req.body;
 
-
     if (!titulo || !String(titulo).trim()) {
       await logActivity({
         req, action: 'CARDEX_CREATE_FAIL', entity: 'CARDEX',
-        statusCode: 400, success: false,
-        error: 'El título es obligatorio',
+        statusCode: 400, success: false, error: 'El título es obligatorio',
         tags: ['cardex'],
       });
       return handleErrorResponse(res, 400, 'El título es obligatorio');
+    }
+
+    if (!onedriveUrl || !isOneDriveFileUrl(onedriveUrl)) {
+      await logActivity({
+        req, action: 'CARDEX_CREATE_FAIL', entity: 'CARDEX',
+        statusCode: 400, success: false, error: 'onedriveUrl inválida (debe ser archivo)', tags: ['cardex'],
+      });
+      return handleErrorResponse(res, 400, 'onedriveUrl inválida (debe ser archivo de OneDrive/SharePoint)');
     }
 
     const catNorm = normalizeCategory(categoria) || 'DOCUMENTO';
@@ -247,7 +213,7 @@ export const createCardex = async (req, res) => {
 
     await logActivity({
       req, action: 'CARDEX_CREATE', entity: 'CARDEX', entityId: doc._id,
-      statusCode: 201, success: true, message: 'Documento creado (OneDrive)',
+      statusCode: 201, success: true, message: 'Documento creado',
       after: sanitizeCardex(doc.toJSON ? doc.toJSON() : doc), tags: ['cardex'],
     });
 
@@ -258,7 +224,10 @@ export const createCardex = async (req, res) => {
     });
   } catch (err) {
     console.error('Error createCardex:', err);
-    await logActivity({ req, action: 'CARDEX_CREATE_FAIL', entity: 'CARDEX', statusCode: 500, success: false, error: err?.message, tags: ['cardex'] });
+    await logActivity({
+      req, action: 'CARDEX_CREATE_FAIL', entity: 'CARDEX',
+      statusCode: 500, success: false, error: err?.message, tags: ['cardex'],
+    });
     return handleErrorResponse(res, 500, 'Error al crear documento', err?.message);
   }
 };
@@ -277,6 +246,7 @@ export const getAllCardex = async (req, res) => {
       Cardex.find(filter).sort(sort).skip(skip).limit(limit).lean(),
     ]);
 
+    // No-cache para listados
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
@@ -284,7 +254,7 @@ export const getAllCardex = async (req, res) => {
 
     await logActivity({
       req, action: 'CARDEX_LIST', entity: 'CARDEX',
-      statusCode: 200, success: true, message: `Listado de cardex Ok (${docs.length} items)`,
+      statusCode: 200, success: true, message: `Listado OK (${docs.length})`,
       tags: ['cardex'],
     });
 
@@ -296,7 +266,10 @@ export const getAllCardex = async (req, res) => {
     });
   } catch (err) {
     console.error('Error getAllCardex:', err);
-    await logActivity({ req, action: 'CARDEX_LIST_FAIL', entity: 'CARDEX', statusCode: 500, success: false, error: err?.message, tags: ['cardex'] });
+    await logActivity({
+      req, action: 'CARDEX_LIST_FAIL', entity: 'CARDEX',
+      statusCode: 500, success: false, error: err?.message, tags: ['cardex'],
+    });
     return handleErrorResponse(res, 500, 'Error al obtener documentos', err?.message);
   }
 };
@@ -305,11 +278,17 @@ export const getCardexById = async (req, res) => {
   try {
     const doc = await Cardex.findById(req.params.cardexId).lean();
     if (!doc) {
-      await logActivity({ req, action: 'CARDEX_GET_FAIL', entity: 'CARDEX', entityId: req.params.cardexId, statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'] });
+      await logActivity({
+        req, action: 'CARDEX_GET_FAIL', entity: 'CARDEX', entityId: req.params.cardexId,
+        statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'],
+      });
       return handleErrorResponse(res, 404, 'Documento no encontrado');
     }
 
-    await logActivity({ req, action: 'CARDEX_GET', entity: 'CARDEX', entityId: doc._id, statusCode: 200, success: true, message: 'Documento encontrado', tags: ['cardex'] });
+    await logActivity({
+      req, action: 'CARDEX_GET', entity: 'CARDEX', entityId: doc._id,
+      statusCode: 200, success: true, message: 'Documento encontrado', tags: ['cardex'],
+    });
 
     return res.status(200).json({
       success: true,
@@ -318,15 +297,16 @@ export const getCardexById = async (req, res) => {
     });
   } catch (err) {
     console.error('Error getCardexById:', err);
-    await logActivity({ req, action: 'CARDEX_GET_FAIL', entity: 'CARDEX', entityId: req.params.cardexId, statusCode: 500, success: false, error: err?.message, tags: ['cardex'] });
+    await logActivity({
+      req, action: 'CARDEX_GET_FAIL', entity: 'CARDEX', entityId: req.params.cardexId,
+      statusCode: 500, success: false, error: err?.message, tags: ['cardex'],
+    });
     return handleErrorResponse(res, 500, 'Error al obtener documento', err?.message);
   }
 };
 
 export const updateCardex = async (req, res) => {
   try {
-    await ensureUploadDir();
-
     const { cardexId } = req.params;
     const {
       titulo,
@@ -344,7 +324,10 @@ export const updateCardex = async (req, res) => {
 
     const doc = await Cardex.findById(cardexId);
     if (!doc) {
-      await logActivity({ req, action: 'CARDEX_UPDATE_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'] });
+      await logActivity({
+        req, action: 'CARDEX_UPDATE_FAIL', entity: 'CARDEX', entityId: cardexId,
+        statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'],
+      });
       return handleErrorResponse(res, 404, 'Documento no encontrado');
     }
 
@@ -360,7 +343,8 @@ export const updateCardex = async (req, res) => {
 
     if (typeof tags !== 'undefined') {
       if (Array.isArray(tags)) doc.tags = tags.map(String).map((s) => s.trim()).filter(Boolean);
-      else if (typeof tags === 'string') doc.tags = String(tags).split(',').map((s) => s.trim()).filter(Boolean);
+      else if (typeof tags === 'string')
+        doc.tags = String(tags).split(',').map((s) => s.trim()).filter(Boolean);
     }
 
     if (typeof isActive !== 'undefined') {
@@ -375,7 +359,6 @@ export const updateCardex = async (req, res) => {
     }
     if (anioDoc !== null) doc.anioDocumento = anioDoc;
 
-    // Cambiar URL de OneDrive (validada)
     if (typeof onedriveUrl !== 'undefined') {
       if (!onedriveUrl || !isOneDriveFileUrl(onedriveUrl)) {
         await logActivity({
@@ -393,15 +376,13 @@ export const updateCardex = async (req, res) => {
     if (typeof mimeType !== 'undefined') doc.mimeType = mimeType ? String(mimeType).trim() : null;
     if (typeof size !== 'undefined') doc.size = (size === null || size === '') ? null : Number(size);
 
-    // Notar que YA NO aceptamos archivo (req.file) ni tocamos fileName.
-
     await doc.save();
 
     const after = doc.toJSON ? doc.toJSON() : doc;
 
     await logActivity({
       req, action: 'CARDEX_UPDATE', entity: 'CARDEX', entityId: doc._id,
-      statusCode: 200, success: true, message: 'Documento actualizado (OneDrive)',
+      statusCode: 200, success: true, message: 'Documento actualizado',
       before, after, tags: ['cardex'],
     });
 
@@ -412,7 +393,10 @@ export const updateCardex = async (req, res) => {
     });
   } catch (err) {
     console.error('Error updateCardex:', err);
-    await logActivity({ req, action: 'CARDEX_UPDATE_FAIL', entity: 'CARDEX', entityId: req.params.cardexId, statusCode: 500, success: false, error: err?.message, tags: ['cardex'] });
+    await logActivity({
+      req, action: 'CARDEX_UPDATE_FAIL', entity: 'CARDEX', entityId: req.params.cardexId,
+      statusCode: 500, success: false, error: err?.message, tags: ['cardex'],
+    });
     return handleErrorResponse(res, 500, 'Error al actualizar documento', err?.message);
   }
 };
@@ -422,13 +406,12 @@ export const deleteCardex = async (req, res) => {
     const { cardexId } = req.params;
     const doc = await Cardex.findByIdAndDelete(cardexId);
     if (!doc) {
-      await logActivity({ req, action: 'CARDEX_DELETE_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'] });
+      await logActivity({
+        req, action: 'CARDEX_DELETE_FAIL', entity: 'CARDEX', entityId: cardexId,
+        statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'],
+      });
       return handleErrorResponse(res, 404, 'Documento no encontrado');
     }
-
-    // No hay que borrar nada en la nube (OneDrive es externo y lo gestiona el usuario).
-    // Legacy: intentar borrar archivo local si existiera (no afecta si no existe)
-    try { if (doc.fileName) await fsp.unlink(path.resolve(CARDEX_UPLOAD_DIR, doc.fileName)); } catch {}
 
     await logActivity({
       req, action: 'CARDEX_DELETE', entity: 'CARDEX', entityId: doc._id,
@@ -439,125 +422,10 @@ export const deleteCardex = async (req, res) => {
     return res.status(200).json({ success: true, message: 'Documento eliminado' });
   } catch (err) {
     console.error('Error deleteCardex:', err);
-    await logActivity({ req, action: 'CARDEX_DELETE_FAIL', entity: 'CARDEX', entityId: req.params.cardexId, statusCode: 500, success: false, error: err?.message, tags: ['cardex'] });
+    await logActivity({
+      req, action: 'CARDEX_DELETE_FAIL', entity: 'CARDEX', entityId: req.params.cardexId,
+      statusCode: 500, success: false, error: err?.message, tags: ['cardex'],
+    });
     return handleErrorResponse(res, 500, 'Error al eliminar documento', err?.message);
-  }
-};
-
-/* =============================================================================
-   Visualización y descarga (redirección a OneDrive). Fallback legacy local.
-============================================================================= */
-
-async function bumpCounter(id, field) {
-  try { await Cardex.updateOne({ _id: id }, { $inc: { [field]: 1 } }); } catch {}
-}
-
-export const streamCardexFile = async (req, res) => {
-  try {
-    const { cardexId } = req.params;
-    const doc = await Cardex.findById(cardexId).lean();
-    if (!doc) {
-      await logActivity({ req, action: 'CARDEX_VIEW_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'] });
-      return handleErrorResponse(res, 404, 'Documento no encontrado');
-    }
-
-    if (doc.onedriveUrl) {
-      bumpCounter(cardexId, 'views');
-      await logActivity({ req, action: 'CARDEX_VIEW', entity: 'CARDEX', entityId: cardexId, statusCode: 302, success: true, message: 'Redirect a OneDrive (view)', tags: ['cardex'] });
-      return res.redirect(302, doc.onedriveUrl);
-    }
-
-    // Fallback legacy local (si existiera fileName)
-    if (!doc.fileName) {
-      await logActivity({ req, action: 'CARDEX_VIEW_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Documento sin fuente disponible', tags: ['cardex'] });
-      return handleErrorResponse(res, 404, 'Documento sin fuente disponible');
-    }
-
-    const filePath = path.resolve(CARDEX_UPLOAD_DIR, doc.fileName);
-    if (!fs.existsSync(filePath)) {
-      await logActivity({ req, action: 'CARDEX_VIEW_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Archivo no encontrado en servidor (legacy)', tags: ['cardex'] });
-      return handleErrorResponse(res, 404, 'Archivo no encontrado en servidor');
-    }
-
-    const stat = await fsp.stat(filePath);
-    const range = req.headers.range;
-
-    res.setHeader('Content-Type', doc.mimeType || 'application/octet-stream');
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-');
-      const start = parseInt(parts[0], 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
-
-      if (start >= stat.size || end >= stat.size) {
-        res.status(416).setHeader('Content-Range', `bytes */${stat.size}`);
-        await logActivity({ req, action: 'CARDEX_VIEW_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 416, success: false, error: 'Rango inválido', tags: ['cardex'] });
-        return res.end();
-      }
-
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-      res.setHeader('Content-Length', end - start + 1);
-
-      const stream = fs.createReadStream(filePath, { start, end });
-      stream.pipe(res);
-      bumpCounter(cardexId, 'views');
-
-      await logActivity({ req, action: 'CARDEX_VIEW', entity: 'CARDEX', entityId: cardexId, statusCode: 206, success: true, message: 'Stream parcial (local legacy)', tags: ['cardex'] });
-    } else {
-      res.setHeader('Content-Length', stat.size);
-      res.status(200);
-      fs.createReadStream(filePath).pipe(res);
-      bumpCounter(cardexId, 'views');
-
-      await logActivity({ req, action: 'CARDEX_VIEW', entity: 'CARDEX', entityId: cardexId, statusCode: 200, success: true, message: 'Stream completo (local legacy)', tags: ['cardex'] });
-    }
-  } catch (err) {
-    console.error('Error streamCardexFile:', err);
-    await logActivity({ req, action: 'CARDEX_VIEW_FAIL', entity: 'CARDEX', entityId: req.params.cardexId, statusCode: 500, success: false, error: err?.message, tags: ['cardex'] });
-    return handleErrorResponse(res, 500, 'Error al visualizar archivo', err?.message);
-  }
-};
-
-export const downloadCardexFile = async (req, res) => {
-  try {
-    const { cardexId } = req.params;
-    const doc = await Cardex.findById(cardexId).lean();
-    if (!doc) {
-      await logActivity({ req, action: 'CARDEX_DOWNLOAD_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Documento no encontrado', tags: ['cardex'] });
-      return handleErrorResponse(res, 404, 'Documento no encontrado');
-    }
-
-    if (doc.onedriveUrl) {
-      bumpCounter(cardexId, 'downloads');
-      const dl = toDownloadUrl(doc.onedriveUrl);
-      await logActivity({ req, action: 'CARDEX_DOWNLOAD', entity: 'CARDEX', entityId: cardexId, statusCode: 302, success: true, message: 'Redirect descarga OneDrive', tags: ['cardex'] });
-      return res.redirect(302, dl);
-    }
-
-    // Fallback legacy local
-    if (!doc.fileName) {
-      await logActivity({ req, action: 'CARDEX_DOWNLOAD_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Documento sin fuente disponible', tags: ['cardex'] });
-      return handleErrorResponse(res, 404, 'Documento sin fuente disponible');
-    }
-
-    const filePath = path.resolve(CARDEX_UPLOAD_DIR, doc.fileName);
-    if (!fs.existsSync(filePath)) {
-      await logActivity({ req, action: 'CARDEX_DOWNLOAD_FAIL', entity: 'CARDEX', entityId: cardexId, statusCode: 404, success: false, error: 'Archivo no encontrado en servidor (legacy)', tags: ['cardex'] });
-      return handleErrorResponse(res, 404, 'Archivo no encontrado en servidor');
-    }
-
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(doc.originalName || doc.fileName)}"`);
-
-    await logActivity({ req, action: 'CARDEX_DOWNLOAD', entity: 'CARDEX', entityId: cardexId, statusCode: 200, success: true, message: 'Descarga (local legacy)', tags: ['cardex'] });
-
-    fs.createReadStream(filePath).pipe(res);
-    bumpCounter(cardexId, 'downloads');
-  } catch (err) {
-    console.error('Error downloadCardexFile:', err);
-    await logActivity({ req, action: 'CARDEX_DOWNLOAD_FAIL', entity: 'CARDEX', entityId: req.params.cardexId, statusCode: 500, success: false, error: err?.message, tags: ['cardex'] });
-    return handleErrorResponse(res, 500, 'Error al descargar archivo', err?.message);
   }
 };

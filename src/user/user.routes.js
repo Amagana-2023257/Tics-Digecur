@@ -16,45 +16,74 @@ import {
   exportUsersCsv,
 } from './user.controller.js';
 import { validateJWT } from '../middlewares/validate-jwt.js';
-import { hasRoles } from '../middlewares/validate-roles.js';
-import { ROLES } from './user.model.js';
+import { requireDeptAndRole, selfOrDeptAndRole } from '../middlewares/authorize-dept-role.js';
 
 const router = Router();
 
 /**
- * Middleware helper: permite si es el propio usuario o si posee alguno de los roles requeridos.
- * Requiere que validateJWT haya puesto req.user { id/_id, roles }.
+ * Grupos de autorización sugeridos.
+ * Ajusta estos arrays según tu organigrama real.
  */
-const selfOr = (...roles) => (req, res, next) => {
-  const authUser = req.user || {};
-  const uid = authUser.id || authUser._id?.toString?.();
-  if (uid && uid === req.params.userId) return next();
-  return hasRoles(...roles)(req, res, next);
-};
+const ADMIN_DEPTS = ['DESAROLLO'];
+const ADMIN_ROLES = ['ADMIN'];
 
-// --- Admin ops (crear, listar, estadísticas, exportar, bulk) ---
-router.post('/', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), createUser);
-router.get('/', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), getAllUsers);
-router.get('/stats', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), getUsersStats);
-router.get('/export', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), exportUsersCsv);
-router.post('/bulk/active', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), bulkSetActive);
+// --- Admin-like (crear, listar, stats, exportar, bulk) ---
+router.post(
+  '/',
+  validateJWT,
+  requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES),
+  createUser
+);
+
+router.get('/', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), getAllUsers);
+router.get('/stats', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), getUsersStats);
+router.get('/export', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), exportUsersCsv);
+router.post('/bulk/active', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), bulkSetActive);
 
 // --- Movimientos internos ---
-router.patch('/:userId/move', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), updateDepartmentAndCargo);
+router.patch(
+  '/:userId/move',
+  validateJWT,
+  requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES),
+  updateDepartmentAndCargo
+);
 
-// --- Lectura/edición individual (propio usuario o admin/director) ---
-router.get('/:userId', validateJWT, selfOr(ROLES.ADMIN, ROLES.DIRECTOR), getUserById);
-router.put('/:userId', validateJWT, selfOr(ROLES.ADMIN, ROLES.DIRECTOR), updateUser);
-router.patch('/:userId/password', validateJWT, selfOr(ROLES.ADMIN, ROLES.DIRECTOR), changePassword);
+// --- Lectura/edición individual (propio usuario o dept+rol admin-like) ---
+router.get('/:userId', validateJWT, selfOrDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), getUserById);
 
-// --- Gestión de roles (solo admin/director) ---
-router.patch('/:userId/roles', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), updateUserRoles);
+router.put(
+  '/:userId',
+  validateJWT,
+  selfOrDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES),
 
-// --- Activación/Desactivación (admin/director) ---
-router.patch('/:userId/deactivate', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), deactivateUser);
-router.patch('/:userId/activate', validateJWT, hasRoles(ROLES.ADMIN, ROLES.DIRECTOR), activateUser);
+  updateUser
+);
 
-// --- Eliminación (solo ADMIN) ---
-router.delete('/:userId', validateJWT, hasRoles(ROLES.ADMIN), deleteUser);
+router.patch(
+  '/:userId/password',
+  validateJWT,
+  selfOrDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES),
+  changePassword
+);
+
+// --- Gestión de roles (solo dept+rol admin-like) ---
+router.patch(
+  '/:userId/roles',
+  validateJWT,
+  requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES),
+  updateUserRoles
+);
+
+// --- Activación/Desactivación (admin-like) ---
+router.patch('/:userId/deactivate', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), deactivateUser);
+router.patch('/:userId/activate', validateJWT, requireDeptAndRole(ADMIN_DEPTS, ADMIN_ROLES), activateUser);
+
+// --- Eliminación (solo DIRECTOR de DIRECCION/AREA ADMINISTRATIVA) ---
+router.delete(
+  '/:userId',
+  validateJWT,
+  requireDeptAndRole(['DIRECCION', 'AREA ADMINISTRATIVA'], ['DIRECTOR']),
+  deleteUser
+);
 
 export default router;

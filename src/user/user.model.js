@@ -2,23 +2,32 @@
 import mongoose from 'mongoose';
 import argon2 from 'argon2';
 
-// Enums básicos (puedes extenderlos)
 export const DEPARTAMENTOS = Object.freeze([
   'DIRECCION',
-  'MATERIALES_EDUCATIVOS',
-  'INVENTARIO',
-  'ASISTENCIA',
+  'AREA FINANCIERA',
+  'SUBDIRECCION EVALUACION CURRICULAR',
+  'BASICO',
+  'SUBDIRECCION DISEÑO Y DESAROLLO CURRICULAR',
+  'AREA DE MATERIALES EDUCATIVOS',
+  'INICIAL Y PREPRIMARIA',
+  'PRIMARIA',
+  'DIVERSIFICADO',
+  'AREA ADMINISTRATIVA',
   'EVALUACION',
+  'DESAROLLO',
 ]);
 
 export const ROLES = Object.freeze([
-  'ADMIN',
   'DIRECTOR',
-  'MATERIALES',
-  'INVENTARIO',
-  'ASISTENCIA',
-  'EVALUACION',
-  'LECTOR', // por defecto solo lectura
+  'SUBDIRECTOR',
+  'JEFE',
+  'ASISTENTE',
+  'TECNICO',
+  'DESAROLLADOR',
+  'INVITADO',
+  'LECTOR',
+  'TENICO',
+  'ADMIN',
 ]);
 
 const PEPPER = process.env.PASSWORD_PEPPER || '';
@@ -97,7 +106,10 @@ const UserSchema = new mongoose.Schema(
 );
 
 // Índice único para email (case-insensitive)
-UserSchema.index({ email: 1 }, { unique: true, collation: { locale: 'en', strength: 2 } });
+UserSchema.index(
+  { email: 1 },
+  { unique: true, collation: { locale: 'en', strength: 2 } }
+);
 
 // Hash con Argon2 si cambia el password
 UserSchema.pre('save', async function (next) {

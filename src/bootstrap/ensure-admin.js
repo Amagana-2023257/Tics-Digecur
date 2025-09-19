@@ -1,7 +1,7 @@
 // src/bootstrap/ensure-admin.js
 import User, { DEPARTAMENTOS } from '../user/user.model.js';
 
-const ADMIN_ROLES = ['ADMIN', 'DIRECTOR'];
+const ADMIN_ROLES = ['ADMIN'];
 const MIN_PWD = 8;
 
 // Genera un password fuerte si el que viene es corto
@@ -14,12 +14,9 @@ function validDefaultPassword() {
 
 export async function ensureDefaultAdmin() {
   const email = process.env.DEFAULT_ADMIN_EMAIL || 'admin@digecur.local';
-  const nombre = process.env.DEFAULT_ADMIN_NAME || 'Administrador';
-  const cargo = 'Director';
-  const defaultDept =
-    (Array.isArray(DEPARTAMENTOS) && DEPARTAMENTOS.includes('DIRECCION'))
-      ? 'DIRECCION'
-      : (DEPARTAMENTOS?.[0] || 'DIRECCION');
+  const nombre = process.env.DEFAULT_ADMIN_NAME || 'ADMIN DIGECUR AMAGANA';
+  const cargo = 'ADMINISTRADOR PAGE';
+  const defaultDept = 'DESAROLLO';
 
   const resetPassword =
     String(process.env.RESET_DEFAULT_ADMIN_PASSWORD || 'false').toLowerCase() === 'true';
@@ -28,14 +25,13 @@ export async function ensureDefaultAdmin() {
   // ¿Existe ya?
   let user = await User.findOne({ email }).select('+password');
   if (!user) {
-    // ✅ Crear SOLO si no existe (idempotente)
     user = new User({
       email,
-      password,                 // se hashea por pre('save') (argon2)
+      password,            
       nombre,
       cargo,
       departamento: defaultDept,
-      roles: ADMIN_ROLES,       // ✅ roles explícitos
+      roles: ADMIN_ROLES,       
       isActive: true,
     });
     await user.save();

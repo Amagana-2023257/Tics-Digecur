@@ -2,12 +2,11 @@
 import mongoose from 'mongoose';
 import InventoryItem from './item.model.js';
 import TransferRequest, { TRANSFER_STATUS } from './transferRequest.model.js';
-import TransferPendingCode from './transferPendingCode.model.js';
+// 🔻 Eliminado: TransferPendingCode y crypto
 import User from '../user/user.model.js';
 import { handleErrorResponse } from '../helpers/handleResponse.js';
 import { logActivity } from '../movements/movement.controller.js';
-import { sendMail } from '../helpers/mailer.js';
-import crypto from 'crypto';
+// 🔻 Eliminado: sendMail y crypto
 
 /* ============================= Helpers genéricos ============================= */
 const toNumberOrUndef = (v) => {
@@ -29,9 +28,10 @@ const fetchUserLabelById = async (oid) => {
     return String(oid);
   }
 };
+// ✅ Alineado a tus roles actuales
 const userHasInventoryRole = (req) => {
   const roles = Array.isArray(req?.user?.roles) ? req.user.roles.map(String) : [];
-  return roles.some((r) => ['ADMIN', 'DIRECTOR', 'INVENTARIO'].includes(r.toUpperCase()));
+  return roles.some((r) => ['ADMIN', 'DIRECTOR', 'JEFE', 'TECNICO'].includes(r.toUpperCase()));
 };
 const escapeRx = (s = '') => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -52,11 +52,6 @@ const sanitizeItem = (it) => {
     updatedAt: it.updatedAt,
   };
 };
-
-/* ============================= Helpers de traslado ============================= */
-const INVITE_TTL_MS = 15 * 60 * 1000; // 15 min
-const genCode = () => String(Math.floor(100000 + Math.random() * 900000)); // 6 dígitos
-const nowPlus = (ms) => new Date(Date.now() + ms);
 
 /* ============================= Filtros (listados) ============================= */
 const buildFilter = (q = {}) => {
@@ -378,12 +373,12 @@ export const deleteItem = async (req, res) => {
 };
 
 /* ============================================================================ */
-/*     TRANSFER — Crear invitación (correo) y Confirmación con código          */
+/*     TRANSFER — Crear solicitud directa (sin pending codes)                  */
 /* ============================================================================ */
 export const createOrConfirmTransferRequest = async (req, res) => {
   try {
     const { itemId } = req.params;
-    const { toUser, motivo, inviteCode } = req.body;
+    const { toUser, motivo } = req.body;
 
     if (!toUser) {
       await logActivity({ req, action: 'INVENTORY_TR_CREATE_FAIL', entity: 'TRANSFER_REQUEST',
@@ -405,105 +400,14 @@ export const createOrConfirmTransferRequest = async (req, res) => {
       return handleErrorResponse(res, 401, 'No autenticado');
     }
 
-    // Fase 1: Crear invitación y enviar código (sin pedirlo en front)
-    if (!String(inviteCode || '').trim()) {
-      // Cierra pendientes abiertos previos del mismo par item/toUser
-      await TransferPendingCode.updateMany(
-        { itemId, toUserId: toUser, resolvedAt: { $exists: false } },
-        { $set: { resolvedAt: new Date() } }
-      );
-
-      const code = genCode();
-      const expiresAt = nowPlus(INVITE_TTL_MS);
-      const invite = await TransferPendingCode.create({
-        itemId,
-        fromUserId: fromUser,
-        toUserId: toUser,
-        motivo: motivo || '',
-        codePlain: code,
-        codeHash: crypto.createHash('sha256').update(code).digest('hex'),
-        expiresAt,
-        sentEmail: false,
-      });
-
-      // Enviar correo
-      let sent = false;
-      try {
-        const toUserDoc = await User.findById(toUser).lean();
-        if (!toUserDoc?.email) throw new Error('Usuario destino sin email');
-        await sendMail({
-          to: toUserDoc.email,
-          subject: `Código de confirmación para traslado de bien: ${item?.noBien || ''}`,
-          text:
-`Hola ${toUserDoc?.nombre || ''},
-
-Has sido propuesto como nuevo responsable del bien "${item?.nombreBien || item?.noBien}".
-Código de confirmación: ${code}
-Este código vence el ${expiresAt.toLocaleString('es-GT')}.
-
-Motivo: ${motivo || '—'}
-
-Atentamente,
-Sistema de Inventario`,
-        });
-        sent = true;
-      } catch (mailErr) {
-        console.error('Error enviando correo de invitación:', mailErr);
-      }
-
-      if (sent) {
-        await TransferPendingCode.findByIdAndUpdate(invite._id, { $set: { sentEmail: true } });
-      }
-
-      await logActivity({
-        req, action: 'INVENTORY_TR_INVITE', entity: 'TRANSFER_PENDING_CODE', entityId: invite._id,
-        statusCode: 201, success: true, message: 'Invitación generada',
-        after: { id: invite._id, itemId, toUser, expiresAt, sentEmail: sent }, tags: ['inventory']
-      });
-
-      return res.status(201).json({
-        success: true,
-        message: 'Invitación generada y correo enviado (si fue posible)',
-        invite: {
-          id: invite._id,
-          itemId,
-          toUser,
-          expiresAt,
-          sentEmail: sent,
-          devCode: process.env.NODE_ENV !== 'production' ? code : undefined,
-        },
-      });
-    }
-
-    // Fase 2: Confirmación con código (se usa desde el flujo del destinatario)
-    const codeStr = String(inviteCode).trim();
-    const codeHash = crypto.createHash('sha256').update(codeStr).digest('hex');
-
-    const pending = await TransferPendingCode.findOne({
-      itemId,
-      toUserId: toUser,
-      $or: [
-        { codeHash },
-        { codePlain: codeStr },
-      ],
-      resolvedAt: { $exists: false },
-      expiresAt: { $gt: new Date() },
-    });
-
-    if (!pending) {
-      await logActivity({ req, action: 'INVENTORY_TR_CONFIRM_FAIL', entity: 'TRANSFER_REQUEST',
-        statusCode: 400, success: false, error: 'Código inválido o expirado', tags: ['inventory'] });
-      return handleErrorResponse(res, 400, 'Código inválido o expirado');
-    }
-
+    // 🚀 Crear solicitud directamente (sin códigos)
     const tr = await TransferRequest.create({
       item: itemId,
       fromUser,
       toUser,
-      motivo,
+      motivo: motivo || '',
       status: TRANSFER_STATUS.PENDING,
     });
-    await TransferPendingCode.findByIdAndUpdate(pending._id, { $set: { resolvedAt: new Date(), inviteId: tr._id } });
 
     const created = await TransferRequest.findById(tr._id)
       .populate('item', 'noBien nombreBien responsable responsableId descripcion numeroTarjeta monto')
@@ -512,8 +416,8 @@ Sistema de Inventario`,
       .lean();
 
     await logActivity({
-      req, action: 'INVENTORY_TR_CONFIRM', entity: 'TRANSFER_REQUEST', entityId: tr._id,
-      statusCode: 201, success: true, message: 'Solicitud creada tras confirmación de código',
+      req, action: 'INVENTORY_TR_CREATE', entity: 'TRANSFER_REQUEST', entityId: tr._id,
+      statusCode: 201, success: true, message: 'Solicitud creada',
       after: created, tags: ['inventory']
     });
 
@@ -736,111 +640,5 @@ export const rejectTransferRequest = async (req, res) => {
   } catch (err) {
     console.error('Error al rechazar solicitud:', err);
     return handleErrorResponse(res, 500, 'Error al rechazar solicitud', err?.message);
-  }
-};
-
-/* ============================================================================ */
-/*                      PENDING CODES — CRUD para listado                       */
-/* ============================================================================ */
-export const listTransferPendingCodes = async (req, res) => {
-  try {
-    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || '20', 10), 1), 100);
-    const skip = (page - 1) * limit;
-
-    const { status } = req.query; // ALL | OPEN | CLOSED
-    const filter = {};
-    if (status === 'OPEN') filter.resolvedAt = { $exists: false };
-    if (status === 'CLOSED') filter.resolvedAt = { $exists: true };
-
-    const [total, docs] = await Promise.all([
-      TransferPendingCode.countDocuments(filter),
-      TransferPendingCode.find(filter).sort('-createdAt').skip(skip).limit(limit).lean(),
-    ]);
-
-    return res.status(200).json({
-      success: true,
-      pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
-      items: docs.map((r) => ({
-        id: r._id,
-        inviteId: r.inviteId || null,
-        itemId: r.itemId,
-        fromUserId: r.fromUserId,
-        toUserId: r.toUserId,
-        motivo: r.motivo,
-        codePlain: r.codePlain, // si no quieres exponerlo, quítalo
-        expiresAt: r.expiresAt,
-        sentEmail: r.sentEmail,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-        resolvedAt: r.resolvedAt,
-      })),
-    });
-  } catch (err) {
-    console.error('Error listTransferPendingCodes:', err);
-    return handleErrorResponse(res, 500, 'Error al listar pendientes', err?.message);
-  }
-};
-
-export const getTransferPendingCodeById = async (req, res) => {
-  try {
-    const { pendingId } = req.params;
-    const r = await TransferPendingCode.findById(pendingId).lean();
-    if (!r) return handleErrorResponse(res, 404, 'Pendiente no encontrado');
-    return res.status(200).json({
-      success: true,
-      item: {
-        id: r._id,
-        inviteId: r.inviteId || null,
-        itemId: r.itemId,
-        fromUserId: r.fromUserId,
-        toUserId: r.toUserId,
-        motivo: r.motivo,
-        codePlain: r.codePlain,
-        expiresAt: r.expiresAt,
-        sentEmail: r.sentEmail,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-        resolvedAt: r.resolvedAt,
-      }
-    });
-  } catch (err) {
-    console.error('Error getTransferPendingCodeById:', err);
-    return handleErrorResponse(res, 500, 'Error al obtener pendiente', err?.message);
-  }
-};
-
-export const updateTransferPendingCode = async (req, res) => {
-  try {
-    const { pendingId } = req.params;
-    const update = {};
-    if (typeof req.body?.codePlain === 'string') {
-      update.codePlain = req.body.codePlain.trim();
-      update.codeHash = crypto.createHash('sha256').update(update.codePlain).digest('hex');
-    }
-    if (req.body?.expiresAt) update.expiresAt = new Date(req.body.expiresAt);
-    if (typeof req.body?.sentEmail === 'boolean') update.sentEmail = req.body.sentEmail;
-    if (req.body?.resolvedAt === null) update.resolvedAt = undefined;
-    if (req.body?.resolvedAt) update.resolvedAt = new Date(req.body.resolvedAt);
-
-    const r = await TransferPendingCode.findByIdAndUpdate(pendingId, { $set: update }, { new: true }).lean();
-    if (!r) return handleErrorResponse(res, 404, 'Pendiente no encontrado');
-
-    return res.status(200).json({ success: true, item: r });
-  } catch (err) {
-    console.error('Error updateTransferPendingCode:', err);
-    return handleErrorResponse(res, 500, 'Error al actualizar pendiente', err?.message);
-  }
-};
-
-export const deleteTransferPendingCode = async (req, res) => {
-  try {
-    const { pendingId } = req.params;
-    const r = await TransferPendingCode.findByIdAndDelete(pendingId).lean();
-    if (!r) return handleErrorResponse(res, 404, 'Pendiente no encontrado');
-    return res.status(200).json({ success: true, message: 'Pendiente eliminado' });
-  } catch (err) {
-    console.error('Error deleteTransferPendingCode:', err);
-    return handleErrorResponse(res, 500, 'Error al eliminar pendiente', err?.message);
   }
 };
