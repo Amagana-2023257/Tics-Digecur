@@ -1,4 +1,3 @@
-// server/index.js  (o donde tengas el código que mostraste)
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -13,6 +12,7 @@ import authRoutes from '../src/auth/auth.routes.js';
 import userRoutes from '../src/user/user.routes.js';
 import cardexRouter from '../src/cardex/cardex.routes.js';
 import inventoryRoutes from '../src/Inventory/inventory.routes.js';
+import correspondenciaRoutes from '../src/correspondencia/correspondencia.routes.js';
 
 import auditApiRoutes from '../src/movements/audit.routes.js';
 import { mountAuditUI } from '../src/movements/audit.ui.routes.js';
@@ -21,6 +21,7 @@ import { ensureDefaultAdmin } from '../src/bootstrap/ensure-admin.js';
 import { connectMongo } from './mongo.js';
 import { attachAudit } from '../src/movements/movement.controller.js';
 
+import { cloudinary } from './cloudinary.js';
 
 
 const { PORT = 3000, CORS_ORIGIN } = process.env;
@@ -71,7 +72,7 @@ const routes = (app) => {
   app.use('/digecur/v1/users', userRoutes);
   app.use('/digecur/v1/inventory', inventoryRoutes);
   app.use('/digecur/v1/cardex', cardexRouter);
-
+  app.use('/digecur/v1/correspondencia', correspondenciaRoutes);
   app.use('/digecur/v1/audit', auditApiRoutes);
   mountAuditUI(app);
 
