@@ -21,6 +21,8 @@ import { ensureDefaultAdmin } from '../src/bootstrap/ensure-admin.js';
 import { connectMongo } from './mongo.js';
 import { attachAudit } from '../src/movements/movement.controller.js';
 
+import muralRoutes from '../src/mural/mural.routes.js';
+
 import { cloudinary } from './cloudinary.js';
 
 
@@ -73,6 +75,7 @@ const routes = (app) => {
   app.use('/digecur/v1/inventory', inventoryRoutes);
   app.use('/digecur/v1/cardex', cardexRouter);
   app.use('/digecur/v1/correspondencia', correspondenciaRoutes);
+  app.use('/digecur/v1/mural', muralRoutes);
   app.use('/digecur/v1/audit', auditApiRoutes);
   mountAuditUI(app);
 
