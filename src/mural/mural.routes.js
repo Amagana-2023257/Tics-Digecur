@@ -34,7 +34,7 @@ router.post('/', validateJWT, canUseMural, uploadNewsImage, createMural);
 router.put('/:muralId', validateJWT, canUseMural, uploadNewsImage, updateMural);
 
 // Listar / Obtener (solo requiere estar autenticado)
-router.get('/', validateJWT, getAllMurals);
+router.get('/', getAllMurals);
 router.get('/:muralId', validateJWT, getMuralById);
 
 // Acciones rápidas
